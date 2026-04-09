@@ -25,3 +25,24 @@ pub trait StorageBackend: Send + Sync {
     /// Returns `None` when the asset does not exist.
     fn get(&self, path: &str) -> impl Future<Output = anyhow::Result<Option<Asset>>> + Send;
 }
+
+/// Local filesystem storage backend (development / on-prem).
+///
+/// Serves files rooted at `root`.  Full implementation lives in the storage PR.
+#[derive(Clone)]
+pub struct LocalStorage {
+    pub root: std::path::PathBuf,
+}
+
+impl LocalStorage {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+impl StorageBackend for LocalStorage {
+    async fn get(&self, _path: &str) -> anyhow::Result<Option<Asset>> {
+        // TODO: implemented in the storage PR
+        anyhow::bail!("LocalStorage::get not yet implemented")
+    }
+}

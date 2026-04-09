@@ -4,13 +4,16 @@
 
 use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api;
 mod storage;
 mod transform;
+
+use api::AppState;
+use storage::LocalStorage;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,9 +24,13 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let state = AppState {
+        storage: Arc::new(LocalStorage::new("./assets")),
+    };
+
     let app = Router::new()
         .route("/health", get(health_check))
-        .merge(api::router())
+        .merge(api::router(state))
         .layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
