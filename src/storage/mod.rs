@@ -59,6 +59,7 @@ fn content_type_from_ext(path: &str) -> &'static str {
 ///
 /// Paths are resolved relative to [`root`](LocalStorage::root).
 /// Configurable via the `RENDITION_ASSETS_PATH` environment variable.
+#[derive(Clone)]
 pub struct LocalStorage {
     root: PathBuf,
 }
