@@ -2,18 +2,18 @@
 //!
 //! Entry point: starts the Axum HTTP server and registers all routes.
 
-use axum::{routing::get, Extension, Json, Router};
+use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-use storage::LocalStorage;
 
 mod api;
 mod storage;
 mod transform;
+
+use api::AppState;
+use storage::LocalStorage;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,12 +31,13 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("RENDITION_ASSETS_PATH").unwrap_or_else(|_| "./assets".into());
     tracing::info!("Asset root: {assets_path}");
 
-    let storage: Arc<LocalStorage> = Arc::new(LocalStorage::new(&assets_path));
+    let state = AppState {
+        storage: Arc::new(LocalStorage::new(&assets_path)),
+    };
 
     let app = Router::new()
         .route("/health", get(health_check))
-        .merge(api::router())
-        .layer(Extension(storage))
+        .merge(api::router(state))
         .layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
