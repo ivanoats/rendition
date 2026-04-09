@@ -1,0 +1,21 @@
+[package]
+name = "rendition"
+version = "0.1.0"
+edition = "2021"
+description = "Open source enterprise media CDN — a modern alternative to Adobe Scene7"
+license = "MIT"
+repository = "https://github.com/ivanoats/rendition"
+
+[dependencies]
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+[dev-dependencies]
+axum-test = "14"
