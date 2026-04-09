@@ -62,12 +62,12 @@ async fn serve_asset<S>(
 where
     S: StorageBackend,
 {
+    if !state.storage.exists(&asset_path).await {
+        return (StatusCode::NOT_FOUND, format!("asset not found: {asset_path}")).into_response();
+    }
+
     let asset = match state.storage.get(&asset_path).await {
-        Ok(Some(asset)) => asset,
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("asset not found: {asset_path}"))
-                .into_response();
-        }
+        Ok(asset) => asset,
         Err(err) => {
             tracing::error!("storage error fetching {asset_path}: {err:#}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "storage error").into_response();

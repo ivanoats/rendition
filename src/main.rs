@@ -19,13 +19,20 @@ use storage::LocalStorage;
 async fn main() -> anyhow::Result<()> {
     // Initialise structured logging.  Set RUST_LOG to control verbosity.
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "rendition=debug,tower_http=debug".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "rendition=debug,tower_http=debug".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // Resolve asset root — override with RENDITION_ASSETS_PATH env var.
+    let assets_path =
+        std::env::var("RENDITION_ASSETS_PATH").unwrap_or_else(|_| "./assets".into());
+    tracing::info!("Asset root: {assets_path}");
+
     let state = AppState {
-        storage: Arc::new(LocalStorage::new("./assets")),
+        storage: Arc::new(LocalStorage::new(&assets_path)),
     };
 
     let app = Router::new()
