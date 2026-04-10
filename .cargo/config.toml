@@ -1,5 +1,2 @@
 [target.aarch64-apple-darwin]
 rustflags = ["-L", "/opt/homebrew/lib"]
-
-[env]
-LIBRARY_PATH = { value = "/opt/homebrew/lib", force = true }
