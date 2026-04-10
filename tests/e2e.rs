@@ -32,7 +32,8 @@ fn setup() -> (TempDir, TestServer) {
     let jpeg = make_fixture_jpeg(64, 64);
     fs::write(dir.path().join("sample.jpg"), &jpeg).expect("failed to write fixture");
 
-    let app = rendition::build_app(dir.path().to_str().unwrap());
+    let root = dir.path().to_string_lossy();
+    let app = rendition::build_app(root.as_ref());
     let server = TestServer::new(app).expect("failed to build test server");
     (dir, server)
 }
