@@ -1,3 +1,5 @@
+<img width="2816" height="1536" alt="image" src="https://github.com/user-attachments/assets/76328afc-bfcc-4e60-a1cb-4be9b577209e" />
+
 # Rendition
 
 > Open source, enterprise-ready media CDN — a modern alternative to Adobe Scene7.
