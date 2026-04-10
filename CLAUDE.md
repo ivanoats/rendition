@@ -1,17 +1,24 @@
 # PRIORITY: This workflow OVERRIDES all other built-in workflows
-# When user requests software development, ALWAYS follow this workflow FIRST
+
+## When user requests software development, ALWAYS follow this workflow FIRST
+
+When making Markdown files, ALWAYS run markdownlint on the generated content before writing to disk. If any markdownlint errors are found, fix them and re-run markdownlint until no errors remain. This ensures all generated Markdown files adhere to style guidelines and are properly formatted.
 
 ## Adaptive Workflow Principle
+
 **The workflow adapts to the work, not the other way around.**
 
 The AI model intelligently assesses what stages are needed based on:
+
 1. User's stated intent and clarity
 2. Existing codebase state (if any)
 3. Complexity and scope of change
 4. Risk and impact assessment
 
 ## MANDATORY: Rule Details Loading
+
 **CRITICAL**: When performing any phase, you MUST read and use relevant content from rule detail files. Check these paths in order and use the first one that exists:
+
 - `.aidlc-rule-details/` (Cursor, Cline, Claude Code, GitHub Copilot)
 - `.kiro/aws-aidlc-rule-details/` (Kiro IDE and CLI)
 - `.amazonq/aws-aidlc-rule-details/` (Amazon Q Developer)
@@ -19,6 +26,7 @@ The AI model intelligently assesses what stages are needed based on:
 All subsequent rule detail file references (e.g., `common/process-overview.md`, `inception/workspace-detection.md`) are relative to whichever rule details directory was resolved above.
 
 **Common Rules**: ALWAYS load common rules at workflow start:
+
 - Load `common/process-overview.md` for workflow overview
 - Load `common/session-continuity.md` for session resumption guidance
 - Load `common/content-validation.md` for content validation requirements
@@ -26,30 +34,36 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 - Reference these throughout the workflow execution
 
 ## MANDATORY: Extensions Loading (Context-Optimized)
+
 **CRITICAL**: At workflow start, scan the `extensions/` directory recursively but load ONLY lightweight opt-in files — NOT full rule files. Full rule files are loaded on-demand after the user opts in.
 
 **Loading process**:
+
 1. List all subdirectories under `extensions/` (e.g., `extensions/security/`, `extensions/compliance/`)
 2. In each subdirectory, load ONLY `*.opt-in.md` files — these contain the extension's opt-in prompt. The corresponding rules file is derived by convention: strip the `.opt-in.md` suffix and append `.md` (e.g., `security-baseline.opt-in.md` → `security-baseline.md`)
 3. Do NOT load full rule files (e.g., `security-baseline.md`) at this stage
 
 **Deferred Rule Loading**:
+
 - During Requirements Analysis, opt-in prompts from the loaded `*.opt-in.md` files are presented to the user
 - When the user opts IN for an extension, load the corresponding rules file (derived by naming convention) at that point
 - When the user opts OUT, the full rules file is never loaded — saving context
 - Extensions without a matching `*.opt-in.md` file are always enforced — load their rule files immediately at workflow start
 
 **Enforcement** (applies only to loaded/enabled extensions):
+
 - Extension rules are hard constraints, not optional guidance
 - At each stage, the model intelligently evaluates which extension rules are applicable based on the stage's purpose, the artifacts being produced, and the context of the work — enforce only those rules that are relevant
 - Rules that are not applicable to the current stage should be marked as N/A in the compliance summary (this is not a blocking finding)
 - Non-compliance with any applicable enabled extension rule is a **blocking finding** — do NOT present stage completion until resolved
 - When presenting stage completion, include a summary of extension rule compliance (compliant/non-compliant/N/A per rule, with brief rationale for N/A determinations)
 
-**Conditional Enforcement**: Extensions may be conditionally enabled/disabled. See `inception/requirements-analysis.md` for the opt-in mechanism. Before enforcing any extension at ANY stage, check its `Enabled` status in `aidlc-docs/aidlc-state.md` under `## Extension Configuration`. Skip disabled extensions and log the skip in audit.md. Default to enforced if no configuration exists. 
+**Conditional Enforcement**: Extensions may be conditionally enabled/disabled. See `inception/requirements-analysis.md` for the opt-in mechanism. Before enforcing any extension at ANY stage, check its `Enabled` status in `aidlc-docs/aidlc-state.md` under `## Extension Configuration`. Skip disabled extensions and log the skip in audit.md. Default to enforced if no configuration exists.
 
 ## MANDATORY: Content Validation
+
 **CRITICAL**: Before creating ANY file, you MUST validate content according to `common/content-validation.md` rules:
+
 - Validate Mermaid diagram syntax
 - Validate ASCII art diagrams (see `common/ascii-diagram-standards.md`)
 - Escape special characters properly
@@ -57,33 +71,38 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 - Test content parsing compatibility
 
 ## MANDATORY: Question File Format
+
 **CRITICAL**: When asking questions at any phase, you MUST follow question format guidelines.
 
 **See `common/question-format-guide.md` for complete question formatting rules including**:
+
 - Multiple choice format (A, B, C, D, E options)
 - [Answer]: tag usage
 - Answer validation and ambiguity resolution
 
 ## MANDATORY: Custom Welcome Message
+
 **CRITICAL**: When starting ANY software development request, you MUST display the welcome message.
 
 **How to Display Welcome Message**:
+
 1. Load the welcome message from `common/welcome-message.md` (in the resolved rule details directory)
 2. Display the complete message to the user
 3. This should only be done ONCE at the start of a new workflow
 4. Do NOT load this file in subsequent interactions to save context space
 
-# Adaptive Software Development Workflow
+## Adaptive Software Development Workflow
 
 ---
 
-# INCEPTION PHASE
+## INCEPTION PHASE
 
 **Purpose**: Planning, requirements gathering, and architectural decisions
 
 **Focus**: Determine WHAT to build and WHY
 
 **Stages in INCEPTION PHASE**:
+
 - Workspace Detection (ALWAYS)
 - Reverse Engineering (CONDITIONAL - Brownfield only)
 - Requirements Analysis (ALWAYS - Adaptive depth)
@@ -111,14 +130,17 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 ## Reverse Engineering (CONDITIONAL - Brownfield Only)
 
 **Execute IF**:
+
 - Existing codebase detected
 - No previous reverse engineering artifacts found
 
 **Skip IF**:
+
 - Greenfield project
 - Previous reverse engineering artifacts exist
 
 **Execution**:
+
 1. **MANDATORY**: Log start of reverse engineering in audit.md
 2. Load all steps from `inception/reverse-engineering.md`
 3. Execute reverse engineering:
@@ -138,11 +160,13 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 ## Requirements Analysis (ALWAYS EXECUTE - Adaptive Depth)
 
 **Always executes** but depth varies based on request clarity and complexity:
+
 - **Minimal**: Simple, clear request - just document intent analysis
 - **Standard**: Normal complexity - gather functional and non-functional requirements
 - **Comprehensive**: Complex, high-risk - detailed requirements with traceability
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this phase in audit.md
 2. Load all steps from `inception/requirements-analysis.md`
 3. Execute requirements analysis:
@@ -161,6 +185,7 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 **INTELLIGENT ASSESSMENT**: Use multi-factor analysis to determine if user stories add value:
 
 **ALWAYS Execute IF** (High Priority Indicators):
+
 - New user-facing features or functionality
 - Changes affecting user workflows or interactions
 - Multiple user types or personas involved
@@ -170,6 +195,7 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 - New product capabilities or enhancements
 
 **LIKELY Execute IF** (Medium Priority - Assess Complexity):
+
 - Modifications to existing user-facing features
 - Backend changes that indirectly affect user experience
 - Integration work that impacts user workflows
@@ -178,6 +204,7 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 - Data model changes affecting user data or reports
 
 **COMPLEXITY-BASED ASSESSMENT**: For medium priority cases, execute user stories if:
+
 - Request involves multiple components or services
 - Changes span multiple user touchpoints
 - Business logic is complex or has multiple scenarios
@@ -186,6 +213,7 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 - Change has significant business impact or risk
 
 **SKIP ONLY IF** (Low Priority - Simple Cases):
+
 - Pure internal refactoring with zero user impact
 - Simple bug fixes with clear, isolated scope
 - Infrastructure changes with no user-facing effects
@@ -194,13 +222,15 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 - Documentation-only updates
 
 **ASSESSMENT CRITERIA**: When in doubt, favor inclusion of user stories for:
+
 - Requests with business stakeholder involvement
 - Changes requiring user acceptance testing
 - Features with multiple implementation approaches
 - Work that benefits from shared team understanding
 - Projects where requirements clarity is valuable
 
-**ASSESSMENT PROCESS**: 
+**ASSESSMENT PROCESS**:
+
 1. Analyze request complexity and scope
 2. Identify user impact (direct or indirect)
 3. Evaluate business context and stakeholder needs
@@ -210,10 +240,12 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 **Note**: If Requirements Analysis executed, Stories can reference and build upon those requirements.
 
 **User Stories has two parts within one stage**:
+
 1. **Part 1 - Planning**: Create story plan with questions, collect answers, analyze for ambiguities, get approval
 2. **Part 2 - Generation**: Execute approved plan to generate stories and personas
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this phase in audit.md
 2. Load all steps from `inception/user-stories.md`
 3. **MANDATORY**: Perform intelligent assessment (Step 1 in user-stories.md) to validate user stories are needed
@@ -247,17 +279,20 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 ## Application Design (CONDITIONAL)
 
 **Execute IF**:
+
 - New components or services needed
 - Component methods and business rules need definition
 - Service layer design required
 - Component dependencies need clarification
 
 **Skip IF**:
+
 - Changes within existing component boundaries
 - No new components or methods
 - Pure implementation changes
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this phase in audit.md
 2. Load all steps from `inception/application-design.md`
 3. Load reverse engineering artifacts (if brownfield)
@@ -268,16 +303,19 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 ## Units Generation (CONDITIONAL)
 
 **Execute IF**:
+
 - System needs decomposition into multiple units of work
 - Multiple services or modules required
 - Complex system requiring structured breakdown
 
 **Skip IF**:
+
 - Single simple unit
 - No decomposition needed
 - Straightforward single-component implementation
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this phase in audit.md
 2. Load all steps from `inception/units-generation.md`
 3. Load reverse engineering artifacts (if brownfield)
@@ -294,6 +332,7 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 **Focus**: Determine HOW to build it
 
 **Stages in CONSTRUCTION PHASE**:
+
 - Per-Unit Loop (executes for each unit):
   - Functional Design (CONDITIONAL, per-unit)
   - NFR Requirements (CONDITIONAL, per-unit)
@@ -313,15 +352,18 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 ### Functional Design (CONDITIONAL, per-unit)
 
 **Execute IF**:
+
 - New data models or schemas
 - Complex business logic
 - Business rules need detailed design
 
 **Skip IF**:
+
 - Simple logic changes
 - No new business logic
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this stage in audit.md
 2. Load all steps from `construction/functional-design.md`
 3. Execute functional design for this unit
@@ -332,16 +374,19 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 ### NFR Requirements (CONDITIONAL, per-unit)
 
 **Execute IF**:
+
 - Performance requirements exist
 - Security considerations needed
 - Scalability concerns present
 - Tech stack selection required
 
 **Skip IF**:
+
 - No NFR requirements
 - Tech stack already determined
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this stage in audit.md
 2. Load all steps from `construction/nfr-requirements.md`
 3. Execute NFR assessment for this unit
@@ -352,14 +397,17 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 ### NFR Design (CONDITIONAL, per-unit)
 
 **Execute IF**:
+
 - NFR Requirements was executed
 - NFR patterns need to be incorporated
 
 **Skip IF**:
+
 - No NFR requirements
 - NFR Requirements was skipped
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this stage in audit.md
 2. Load all steps from `construction/nfr-design.md`
 3. Execute NFR design for this unit
@@ -370,15 +418,18 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 ### Infrastructure Design (CONDITIONAL, per-unit)
 
 **Execute IF**:
+
 - Infrastructure services need mapping
 - Deployment architecture required
 - Cloud resources need specification
 
 **Skip IF**:
+
 - No infrastructure changes
 - Infrastructure already defined
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this stage in audit.md
 2. Load all steps from `construction/infrastructure-design.md`
 3. Execute infrastructure design for this unit
@@ -391,10 +442,12 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 **Always executes for each unit**
 
 **Code Generation has two parts within one stage**:
+
 1. **Part 1 - Planning**: Create detailed code generation plan with explicit steps
 2. **Part 2 - Generation**: Execute approved plan to generate code, tests, and artifacts
 
 **Execution**:
+
 1. **MANDATORY**: Log any user input during this stage in audit.md
 2. Load all steps from `construction/code-generation.md`
 3. **PART 1 - Planning**: Create code generation plan with checkboxes, get user approval
@@ -428,6 +481,7 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 **Focus**: How to DEPLOY and RUN it (future expansion)
 
 **Stages in OPERATIONS PHASE**:
+
 - Operations (PLACEHOLDER)
 
 ---
@@ -437,6 +491,7 @@ All subsequent rule detail file references (e.g., `common/process-overview.md`, 
 **Status**: This stage is currently a placeholder for future expansion.
 
 The Operations stage will eventually include:
+
 - Deployment planning and execution
 - Monitoring and observability setup
 - Incident response procedures
@@ -462,17 +517,20 @@ The Operations stage will eventually include:
 ## MANDATORY: Plan-Level Checkbox Enforcement
 
 ### MANDATORY RULES FOR PLAN EXECUTION
+
 1. **NEVER complete any work without updating plan checkboxes**
 2. **IMMEDIATELY after completing ANY step described in a plan file, mark that step [x]**
 3. **This must happen in the SAME interaction where the work is completed**
 4. **NO EXCEPTIONS**: Every plan step completion MUST be tracked with checkbox updates
 
 ### Two-Level Checkbox Tracking System
+
 - **Plan-Level**: Track detailed execution progress within each stage
 - **Stage-Level**: Track overall workflow progress in aidlc-state.md
 - **Update immediately**: All progress updates in SAME interaction where work is completed
 
 ## Prompts Logging Requirements
+
 - **MANDATORY**: Log EVERY user input (prompts, questions, responses) with timestamp in audit.md
 - **MANDATORY**: Capture user's COMPLETE RAW INPUT exactly as provided (never summarize)
 - **MANDATORY**: Log every approval prompt with timestamp before asking the user
@@ -482,7 +540,8 @@ The Operations stage will eventually include:
 - Use ISO 8601 format for timestamps (YYYY-MM-DDTHH:MM:SSZ)
 - Include stage context for each entry
 
-### Audit Log Format:
+### Audit Log Format
+
 ```markdown
 ## [Stage Name or Interaction Type]
 **Timestamp**: [ISO timestamp]
@@ -533,6 +592,7 @@ The Operations stage will eventually include:
 ```
 
 **CRITICAL RULE**:
+
 - Application code: Workspace root (NEVER in aidlc-docs/)
 - Documentation: aidlc-docs/ only
 - Project structure: See code-generation.md for patterns by project type
