@@ -1,2 +1,4 @@
 /target
 .claude/worktrees
+.claude/settings.local.json
+aidlc-docs/audit.md
