@@ -5,12 +5,18 @@
 
 use axum::http::StatusCode;
 use axum_test::TestServer;
+use rendition::config::AppConfig;
+use std::path::PathBuf;
 
 fn make_server() -> TestServer {
     // CARGO_MANIFEST_DIR points to the crate root, so `assets/` is resolvable
     // regardless of the working directory when `cargo test` is run.
     let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
-    let app = rendition::build_app(assets);
+    let config = AppConfig {
+        assets_path: PathBuf::from(assets),
+        ..AppConfig::default()
+    };
+    let app = rendition::build_app(&config);
     TestServer::new(app).unwrap()
 }
 
