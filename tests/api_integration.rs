@@ -56,7 +56,7 @@ async fn cdn_fmt_webp_returns_200_with_webp_content_type() {
     let server = make_server();
     let resp = server
         .get("/cdn/sample.png")
-        .add_query_params(&[("fmt", "webp")])
+        .add_query_params([("fmt", "webp")])
         .await;
     resp.assert_status_ok();
     let ct = resp
@@ -73,7 +73,7 @@ async fn cdn_resize_width_returns_200() {
     let server = make_server();
     server
         .get("/cdn/sample.png")
-        .add_query_params(&[("wid", "50")])
+        .add_query_params([("wid", "50")])
         .await
         .assert_status_ok();
 }
@@ -83,7 +83,7 @@ async fn cdn_resize_crop_returns_200() {
     let server = make_server();
     server
         .get("/cdn/sample.png")
-        .add_query_params(&[("wid", "50"), ("hei", "50"), ("fit", "crop")])
+        .add_query_params([("wid", "50"), ("hei", "50"), ("fit", "crop")])
         .await
         .assert_status_ok();
 }
@@ -93,7 +93,7 @@ async fn cdn_rotate_returns_200() {
     let server = make_server();
     server
         .get("/cdn/sample.png")
-        .add_query_params(&[("rotate", "90")])
+        .add_query_params([("rotate", "90")])
         .await
         .assert_status_ok();
 }
