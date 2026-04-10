@@ -46,6 +46,12 @@ pub trait StorageBackend: Send + Sync {
 /// directory-traversal attacks where a caller supplies a path like
 /// `"../../etc/passwd"` to escape the storage root.
 ///
+/// **Limitation**: this check is purely lexical.  Symlinks inside the root
+/// directory that point outside it are not followed or checked here.  If the
+/// underlying storage needs to defend against symlink-based escapes, callers
+/// should additionally canonicalize the resolved path and verify it remains
+/// under `root`.
+///
 /// Returns an error if `path` contains any unsafe component.
 fn safe_join(root: &Path, path: &str) -> anyhow::Result<PathBuf> {
     let rel = Path::new(path);
