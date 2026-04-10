@@ -7,8 +7,8 @@
 use anyhow::Context;
 use libvips::{
     ops::{
-        self, ForeignHeifCompression, HeifsaveBufferOptions, Interesting, JpegsaveBufferOptions,
-        ThumbnailImageOptions, WebpsaveBufferOptions,
+        self, ForeignHeifCompression, HeifsaveBufferOptions, JpegsaveBufferOptions,
+        ResizeOptions, WebpsaveBufferOptions,
     },
     VipsApp, VipsImage,
 };
@@ -55,6 +55,10 @@ fn ensure_vips() {
 
 /// Apply `params` to the raw bytes of a source image.
 ///
+/// `original_content_type` is the MIME type of the source asset (e.g.
+/// `"image/png"`).  It is used as the default output format when the caller
+/// does not supply an explicit `fmt` parameter.
+///
 /// Returns the transformed image bytes and the MIME type of the output format.
 ///
 /// # Errors
@@ -62,8 +66,10 @@ fn ensure_vips() {
 pub async fn apply(
     source: Vec<u8>,
     params: TransformParams,
+    original_content_type: &str,
 ) -> anyhow::Result<(Vec<u8>, &'static str)> {
-    tokio::task::spawn_blocking(move || apply_blocking(source, params))
+    let original_content_type = original_content_type.to_owned();
+    tokio::task::spawn_blocking(move || apply_blocking(source, params, &original_content_type))
         .await
         .context("transform task panicked")?
 }
@@ -73,6 +79,7 @@ pub async fn apply(
 fn apply_blocking(
     source: Vec<u8>,
     params: TransformParams,
+    original_content_type: &str,
 ) -> anyhow::Result<(Vec<u8>, &'static str)> {
     ensure_vips();
 
@@ -83,7 +90,7 @@ fn apply_blocking(
     let image = apply_resize(image, &params)?;
     let image = apply_rotation(image, &params)?;
     let image = apply_flip(image, &params)?;
-    encode(image, &params)
+    encode(image, &params, original_content_type)
 }
 
 fn apply_crop(image: VipsImage, params: &TransformParams) -> anyhow::Result<VipsImage> {
@@ -112,32 +119,49 @@ fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vi
         return Ok(image);
     }
 
-    // A missing dimension becomes "unconstrained" (very large number).
-    let thumb_w = params.wid.map(|v| v as i32).unwrap_or(i32::MAX);
-    let thumb_h = params.hei.map(|v| v as i32).unwrap_or(i32::MAX);
+    let orig_w = image.get_width() as f64;
+    let orig_h = image.get_height() as f64;
     let fit = params.fit.as_deref().unwrap_or("constrain");
 
-    let opts = match fit {
-        "crop" => ThumbnailImageOptions {
-            height: thumb_h,
-            crop: Interesting::Centre,
-            ..Default::default()
-        },
-        "stretch" | "fill" => ThumbnailImageOptions {
-            height: thumb_h,
-            size: ops::Size::Force,
-            ..Default::default()
-        },
+    // Scale factors for each axis; an unspecified dimension is unconstrained.
+    let sx = params.wid.map(|w| w as f64 / orig_w).unwrap_or(f64::MAX);
+    let sy = params.hei.map(|h| h as f64 / orig_h).unwrap_or(f64::MAX);
+
+    let (hscale, vscale) = match fit {
+        // Fill the box and crop — scale up to the larger factor.
+        "crop" => {
+            let s = sx.max(sy);
+            (s, s)
+        }
+        // Stretch each axis independently.
+        "stretch" | "fill" => (sx, sy),
+        // Constrain / fit within the box — scale by the smaller factor.
         _ => {
-            // "constrain", "fit", or unrecognised → fit within the box
-            ThumbnailImageOptions {
-                height: thumb_h,
-                ..Default::default()
-            }
+            let s = sx.min(sy);
+            (s, s)
         }
     };
 
-    ops::thumbnail_image_with_opts(&image, thumb_w, &opts).context("resize failed")
+    // ops::resize takes hscale and an optional vscale (defaults to hscale).
+    let resized = if (hscale - vscale).abs() < f64::EPSILON {
+        ops::resize(&image, hscale).context("resize failed")?
+    } else {
+        ops::resize_with_opts(&image, hscale, &ResizeOptions { vscale, ..Default::default() })
+            .context("resize failed")?
+    };
+
+    // For crop mode, extract the centre to the exact requested dimensions.
+    if fit == "crop" {
+        let rw = resized.get_width();
+        let rh = resized.get_height();
+        let tw = params.wid.map(|w| (w as i32).min(rw)).unwrap_or(rw);
+        let th = params.hei.map(|h| (h as i32).min(rh)).unwrap_or(rh);
+        let x = (rw - tw) / 2;
+        let y = (rh - th) / 2;
+        ops::extract_area(&resized, x, y, tw, th).context("centre-crop failed")
+    } else {
+        Ok(resized)
+    }
 }
 
 fn apply_rotation(image: VipsImage, params: &TransformParams) -> anyhow::Result<VipsImage> {
@@ -162,10 +186,25 @@ fn apply_flip(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vips
     }
 }
 
-fn encode(image: VipsImage, params: &TransformParams) -> anyhow::Result<(Vec<u8>, &'static str)> {
-    let quality = params.qlt.unwrap_or(85) as i32;
+/// Map a MIME type to the short format name used by the `fmt` query param.
+fn mime_to_fmt(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/avif" => "avif",
+        _ => "jpeg",
+    }
+}
 
-    match params.fmt.as_deref().unwrap_or("jpeg") {
+fn encode(
+    image: VipsImage,
+    params: &TransformParams,
+    original_content_type: &str,
+) -> anyhow::Result<(Vec<u8>, &'static str)> {
+    let quality = params.qlt.unwrap_or(85) as i32;
+    let default_fmt = mime_to_fmt(original_content_type);
+
+    match params.fmt.as_deref().unwrap_or(default_fmt) {
         "webp" => {
             let bytes = ops::webpsave_buffer_with_opts(
                 &image,
@@ -260,7 +299,9 @@ mod tests {
     #[ignore = "requires libvips installed"]
     async fn passthrough_returns_jpeg() {
         let bytes = make_test_jpeg(64, 64);
-        let (out, mime) = apply(bytes, TransformParams::default()).await.unwrap();
+        let (out, mime) = apply(bytes, TransformParams::default(), "image/jpeg")
+            .await
+            .unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
     }
@@ -273,7 +314,7 @@ mod tests {
             wid: Some(32),
             ..Default::default()
         };
-        let (out, mime) = apply(bytes, params).await.unwrap();
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
     }
@@ -289,7 +330,7 @@ mod tests {
             qlt: Some(80),
             ..Default::default()
         };
-        let (out, mime) = apply(bytes, params).await.unwrap();
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/webp");
         assert!(!out.is_empty());
     }
@@ -305,7 +346,7 @@ mod tests {
             fmt: Some("png".to_string()),
             ..Default::default()
         };
-        let (out, mime) = apply(bytes, params).await.unwrap();
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/png");
         assert!(!out.is_empty());
     }
@@ -319,7 +360,7 @@ mod tests {
             rotate: Some(90),
             ..Default::default()
         };
-        let (out, mime) = apply(bytes, params).await.unwrap();
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
     }
@@ -332,7 +373,7 @@ mod tests {
             flip: Some("hv".to_string()),
             ..Default::default()
         };
-        let (out, mime) = apply(bytes, params).await.unwrap();
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
     }
@@ -347,7 +388,7 @@ mod tests {
             qlt: Some(60),
             ..Default::default()
         };
-        let (out, mime) = apply(bytes, params).await.unwrap();
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/avif");
         assert!(!out.is_empty());
     }

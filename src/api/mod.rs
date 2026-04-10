@@ -74,7 +74,7 @@ where
         }
     };
 
-    match transform::apply(asset.data, params).await {
+    match transform::apply(asset.data, params, &asset.content_type).await {
         Ok((bytes, content_type)) => (
             [(
                 header::CONTENT_TYPE,

@@ -126,3 +126,95 @@ impl StorageBackend for S3Storage {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- content_type_from_ext ---
+
+    #[test]
+    fn extension_to_mime_jpeg() {
+        assert_eq!(content_type_from_ext("photo.jpg"), "image/jpeg");
+        assert_eq!(content_type_from_ext("photo.jpeg"), "image/jpeg");
+    }
+
+    #[test]
+    fn extension_to_mime_png() {
+        assert_eq!(content_type_from_ext("image.png"), "image/png");
+    }
+
+    #[test]
+    fn extension_to_mime_webp() {
+        assert_eq!(content_type_from_ext("image.webp"), "image/webp");
+    }
+
+    #[test]
+    fn extension_to_mime_svg() {
+        assert_eq!(content_type_from_ext("icon.svg"), "image/svg+xml");
+    }
+
+    #[test]
+    fn extension_to_mime_mp4() {
+        assert_eq!(content_type_from_ext("video.mp4"), "video/mp4");
+    }
+
+    #[test]
+    fn extension_to_mime_unknown() {
+        assert_eq!(
+            content_type_from_ext("file.xyz"),
+            "application/octet-stream"
+        );
+        assert_eq!(content_type_from_ext("no-extension"), "application/octet-stream");
+    }
+
+    // --- LocalStorage ---
+
+    #[tokio::test]
+    async fn local_storage_get_existing_file() {
+        let dir = std::env::temp_dir();
+        let filename = "rendition_test_get_existing.png";
+        let file_path = dir.join(filename);
+        let data = b"fake png bytes";
+        tokio::fs::write(&file_path, data).await.unwrap();
+
+        let storage = LocalStorage::new(&dir);
+        let asset = storage.get(filename).await.unwrap();
+
+        assert_eq!(asset.data, data);
+        assert_eq!(asset.content_type, "image/png");
+        assert_eq!(asset.size, data.len());
+
+        tokio::fs::remove_file(&file_path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn local_storage_get_missing_file() {
+        let storage = LocalStorage::new(std::env::temp_dir());
+        let result = storage.get("rendition_test_does_not_exist_xyz.png").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn local_storage_exists_true() {
+        let dir = std::env::temp_dir();
+        let filename = "rendition_test_exists_true.png";
+        let file_path = dir.join(filename);
+        tokio::fs::write(&file_path, b"data").await.unwrap();
+
+        let storage = LocalStorage::new(&dir);
+        assert!(storage.exists(filename).await);
+
+        tokio::fs::remove_file(&file_path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn local_storage_exists_false() {
+        let storage = LocalStorage::new(std::env::temp_dir());
+        assert!(!storage.exists("rendition_test_absent_xyz.png").await);
+    }
+}
+

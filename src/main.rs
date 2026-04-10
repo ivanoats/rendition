@@ -2,22 +2,11 @@
 //!
 //! Entry point: starts the Axum HTTP server and registers all routes.
 
-use axum::{routing::get, Json, Router};
-use serde_json::{json, Value};
-use std::{net::SocketAddr, sync::Arc};
-use tower_http::trace::TraceLayer;
+use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-mod api;
-mod storage;
-mod transform;
-
-use api::AppState;
-use storage::LocalStorage;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialise structured logging.  Set RUST_LOG to control verbosity.
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -26,19 +15,11 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Resolve asset root — override with RENDITION_ASSETS_PATH env var.
     let assets_path =
         std::env::var("RENDITION_ASSETS_PATH").unwrap_or_else(|_| "./assets".into());
     tracing::info!("Asset root: {assets_path}");
 
-    let state = AppState {
-        storage: Arc::new(LocalStorage::new(&assets_path)),
-    };
-
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .merge(api::router(state))
-        .layer(TraceLayer::new_for_http());
+    let app = rendition::build_app(&assets_path);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     tracing::info!("Rendition listening on {addr}");
@@ -47,9 +28,4 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-/// GET /health — liveness probe
-async fn health_check() -> Json<Value> {
-    Json(json!({ "status": "ok", "service": "rendition" }))
 }
