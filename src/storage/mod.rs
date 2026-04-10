@@ -7,7 +7,7 @@
 //! * [`S3Storage`] — Amazon S3 / S3-compatible (stub, not yet implemented)
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 /// A raw media asset fetched from a backend.
 pub struct Asset {
@@ -20,6 +20,11 @@ pub struct Asset {
 }
 
 /// Trait implemented by every storage backend.
+///
+/// Methods return `impl Future + Send` (RPITIT) so that callers in generic
+/// contexts (e.g. axum handlers) can rely on the futures being `Send` without
+/// requiring nightly Return Type Notation (RTN) to express that bound.
+/// Concrete `impl` blocks use `async fn` directly — Rust 1.75+ allows this.
 pub trait StorageBackend: Send + Sync {
     /// Retrieve an asset by its logical path (e.g. `"products/shoe.jpg"`).
     ///
@@ -28,6 +33,38 @@ pub trait StorageBackend: Send + Sync {
 
     /// Return `true` if the asset exists in this backend.
     fn exists(&self, path: &str) -> impl Future<Output = bool> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Path-safety helper
+// ---------------------------------------------------------------------------
+
+/// Validates that `path` is a safe relative path and joins it with `root`.
+///
+/// Rejects paths that are absolute or that contain any non-[`Component::Normal`]
+/// segment (e.g. `..`, `.`, or a Windows drive prefix).  This prevents
+/// directory-traversal attacks where a caller supplies a path like
+/// `"../../etc/passwd"` to escape the storage root.
+///
+/// **Limitation**: this check is purely lexical.  Symlinks inside the root
+/// directory that point outside it are not followed or checked here.  If the
+/// underlying storage needs to defend against symlink-based escapes, callers
+/// should additionally canonicalize the resolved path and verify it remains
+/// under `root`.
+///
+/// Returns an error if `path` contains any unsafe component.
+fn safe_join(root: &Path, path: &str) -> anyhow::Result<PathBuf> {
+    let rel = Path::new(path);
+    if rel.is_absolute() {
+        anyhow::bail!("path must be relative: {path}");
+    }
+    for component in rel.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => anyhow::bail!("invalid path component in: {path}"),
+        }
+    }
+    Ok(root.join(rel))
 }
 
 // ---------------------------------------------------------------------------
@@ -72,25 +109,25 @@ impl LocalStorage {
 }
 
 impl StorageBackend for LocalStorage {
-    fn get(&self, path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send {
-        let full_path = self.root.join(path);
+    async fn get(&self, path: &str) -> anyhow::Result<Asset> {
+        let full_path = safe_join(&self.root, path)?;
         let content_type = content_type_from_ext(path).to_string();
-        async move {
-            let data = tokio::fs::read(&full_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
-            let size = data.len();
-            Ok(Asset {
-                data,
-                content_type,
-                size,
-            })
-        }
+        let data = tokio::fs::read(&full_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
+        let size = data.len();
+        Ok(Asset {
+            data,
+            content_type,
+            size,
+        })
     }
 
-    fn exists(&self, path: &str) -> impl Future<Output = bool> + Send {
-        let full_path = self.root.join(path);
-        async move { tokio::fs::metadata(&full_path).await.is_ok() }
+    async fn exists(&self, path: &str) -> bool {
+        let Ok(full_path) = safe_join(&self.root, path) else {
+            return false;
+        };
+        tokio::fs::metadata(full_path).await.is_ok()
     }
 }
 
@@ -251,5 +288,53 @@ mod tests {
         let asset = storage.get("big.jpg").await.unwrap();
         assert_eq!(asset.size, 1024);
         assert_eq!(asset.data.len(), 1024);
+    }
+
+    // -- Directory traversal prevention -------------------------------------
+
+    #[tokio::test]
+    async fn get_rejects_dotdot_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(storage.get("../etc/passwd").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_rejects_absolute_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(storage.get("/etc/passwd").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn exists_returns_false_for_dotdot_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(!storage.exists("../secret.txt").await);
+    }
+
+    #[tokio::test]
+    async fn exists_returns_false_for_absolute_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(!storage.exists("/etc/passwd").await);
+    }
+
+    #[test]
+    fn safe_join_accepts_normal_path() {
+        let root = std::path::Path::new("/tmp/root");
+        assert!(safe_join(root, "products/shoe.jpg").is_ok());
+    }
+
+    #[test]
+    fn safe_join_rejects_dotdot() {
+        let root = std::path::Path::new("/tmp/root");
+        assert!(safe_join(root, "../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn safe_join_rejects_absolute() {
+        let root = std::path::Path::new("/tmp/root");
+        assert!(safe_join(root, "/etc/passwd").is_err());
     }
 }
