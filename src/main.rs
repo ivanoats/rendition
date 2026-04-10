@@ -1,6 +1,7 @@
 //! Rendition — open source enterprise media CDN
 //!
-//! Entry point: starts the Axum HTTP server and registers all routes.
+//! Entry point: initialises logging, resolves configuration, and starts the
+//! Axum HTTP server.  Application logic lives in the `rendition` library crate.
 
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -15,8 +16,8 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let assets_path =
-        std::env::var("RENDITION_ASSETS_PATH").unwrap_or_else(|_| "./assets".into());
+    // Resolve asset root — override with RENDITION_ASSETS_PATH env var.
+    let assets_path = std::env::var("RENDITION_ASSETS_PATH").unwrap_or_else(|_| "./assets".into());
     tracing::info!("Asset root: {assets_path}");
 
     let app = rendition::build_app(&assets_path);

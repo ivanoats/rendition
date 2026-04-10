@@ -34,7 +34,7 @@ pub trait StorageBackend: Send + Sync {
 // Content-type detection
 // ---------------------------------------------------------------------------
 
-fn content_type_from_ext(path: &str) -> &'static str {
+pub(crate) fn content_type_from_ext(path: &str) -> &'static str {
     let lower = path.to_lowercase();
     match lower.rsplit('.').next().unwrap_or("") {
         "jpg" | "jpeg" => "image/jpeg",
@@ -133,88 +133,123 @@ impl StorageBackend for S3Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
-    // --- content_type_from_ext ---
+    // -- content_type_from_ext -----------------------------------------------
 
     #[test]
-    fn extension_to_mime_jpeg() {
+    fn content_type_jpeg() {
         assert_eq!(content_type_from_ext("photo.jpg"), "image/jpeg");
+        assert_eq!(content_type_from_ext("photo.JPEG"), "image/jpeg");
         assert_eq!(content_type_from_ext("photo.jpeg"), "image/jpeg");
     }
 
     #[test]
-    fn extension_to_mime_png() {
+    fn content_type_png() {
         assert_eq!(content_type_from_ext("image.png"), "image/png");
     }
 
     #[test]
-    fn extension_to_mime_webp() {
+    fn content_type_webp() {
         assert_eq!(content_type_from_ext("image.webp"), "image/webp");
     }
 
     #[test]
-    fn extension_to_mime_svg() {
+    fn content_type_avif() {
+        assert_eq!(content_type_from_ext("image.avif"), "image/avif");
+    }
+
+    #[test]
+    fn content_type_gif() {
+        assert_eq!(content_type_from_ext("anim.gif"), "image/gif");
+    }
+
+    #[test]
+    fn content_type_svg() {
         assert_eq!(content_type_from_ext("icon.svg"), "image/svg+xml");
     }
 
     #[test]
-    fn extension_to_mime_mp4() {
-        assert_eq!(content_type_from_ext("video.mp4"), "video/mp4");
+    fn content_type_video() {
+        assert_eq!(content_type_from_ext("clip.mp4"), "video/mp4");
+        assert_eq!(content_type_from_ext("clip.webm"), "video/webm");
+        assert_eq!(content_type_from_ext("clip.mov"), "video/quicktime");
     }
 
     #[test]
-    fn extension_to_mime_unknown() {
+    fn content_type_pdf() {
+        assert_eq!(content_type_from_ext("doc.pdf"), "application/pdf");
+    }
+
+    #[test]
+    fn content_type_unknown_falls_back_to_octet_stream() {
         assert_eq!(
             content_type_from_ext("file.xyz"),
             "application/octet-stream"
         );
-        assert_eq!(content_type_from_ext("no-extension"), "application/octet-stream");
+        assert_eq!(
+            content_type_from_ext("noextension"),
+            "application/octet-stream"
+        );
     }
 
-    // --- LocalStorage ---
+    // -- LocalStorage --------------------------------------------------------
 
     #[tokio::test]
-    async fn local_storage_get_existing_file() {
-        let dir = std::env::temp_dir();
-        let filename = "rendition_test_get_existing.png";
-        let file_path = dir.join(filename);
-        let data = b"fake png bytes";
-        tokio::fs::write(&file_path, data).await.unwrap();
+    async fn exists_returns_true_for_present_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("test.jpg"), b"data").unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(storage.exists("test.jpg").await);
+    }
 
-        let storage = LocalStorage::new(&dir);
-        let asset = storage.get(filename).await.unwrap();
+    #[tokio::test]
+    async fn exists_returns_false_for_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(!storage.exists("ghost.jpg").await);
+    }
 
-        assert_eq!(asset.data, data);
+    #[tokio::test]
+    async fn get_returns_correct_bytes_and_content_type() {
+        let dir = TempDir::new().unwrap();
+        let payload = b"fake jpeg payload";
+        fs::write(dir.path().join("photo.jpg"), payload).unwrap();
+        let storage = LocalStorage::new(dir.path());
+
+        let asset = storage.get("photo.jpg").await.unwrap();
+        assert_eq!(asset.data, payload);
+        assert_eq!(asset.content_type, "image/jpeg");
+        assert_eq!(asset.size, payload.len());
+    }
+
+    #[tokio::test]
+    async fn get_returns_correct_content_type_for_png() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("banner.png"), b"png data").unwrap();
+        let storage = LocalStorage::new(dir.path());
+
+        let asset = storage.get("banner.png").await.unwrap();
         assert_eq!(asset.content_type, "image/png");
-        assert_eq!(asset.size, data.len());
-
-        tokio::fs::remove_file(&file_path).await.ok();
     }
 
     #[tokio::test]
-    async fn local_storage_get_missing_file() {
-        let storage = LocalStorage::new(std::env::temp_dir());
-        let result = storage.get("rendition_test_does_not_exist_xyz.png").await;
-        assert!(result.is_err());
+    async fn get_returns_error_for_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(storage.get("ghost.jpg").await.is_err());
     }
 
     #[tokio::test]
-    async fn local_storage_exists_true() {
-        let dir = std::env::temp_dir();
-        let filename = "rendition_test_exists_true.png";
-        let file_path = dir.join(filename);
-        tokio::fs::write(&file_path, b"data").await.unwrap();
+    async fn get_size_matches_file_length() {
+        let dir = TempDir::new().unwrap();
+        let data = vec![0u8; 1024];
+        fs::write(dir.path().join("big.jpg"), &data).unwrap();
+        let storage = LocalStorage::new(dir.path());
 
-        let storage = LocalStorage::new(&dir);
-        assert!(storage.exists(filename).await);
-
-        tokio::fs::remove_file(&file_path).await.ok();
-    }
-
-    #[tokio::test]
-    async fn local_storage_exists_false() {
-        let storage = LocalStorage::new(std::env::temp_dir());
-        assert!(!storage.exists("rendition_test_absent_xyz.png").await);
+        let asset = storage.get("big.jpg").await.unwrap();
+        assert_eq!(asset.size, 1024);
+        assert_eq!(asset.data.len(), 1024);
     }
 }
-
