@@ -5,15 +5,14 @@
 //! memory-efficient processing of large images.
 
 use anyhow::Context;
+#[cfg(test)]
+use libvips::ops::BlackOptions;
 use libvips::{
     ops::{
-        self, ForeignHeifCompression, HeifsaveBufferOptions, JpegsaveBufferOptions,
-        ResizeOptions,
+        self, ForeignHeifCompression, HeifsaveBufferOptions, JpegsaveBufferOptions, ResizeOptions,
     },
     VipsApp, VipsImage,
 };
-#[cfg(test)]
-use libvips::ops::BlackOptions;
 use std::sync::OnceLock;
 
 /// Parameters parsed from a Rendition transform URL.
@@ -46,9 +45,7 @@ static VIPS_APP: OnceLock<VipsApp> = OnceLock::new();
 
 /// Ensure libvips is initialised exactly once for the process lifetime.
 pub(crate) fn ensure_vips() {
-    VIPS_APP.get_or_init(|| {
-        VipsApp::new("rendition", false).expect("Cannot initialize libvips")
-    });
+    VIPS_APP.get_or_init(|| VipsApp::new("rendition", false).expect("Cannot initialize libvips"));
 }
 
 // ---- Public API ------------------------------------------------------------
@@ -76,8 +73,7 @@ fn apply_blocking(
 ) -> anyhow::Result<(Vec<u8>, &'static str)> {
     ensure_vips();
 
-    let image = VipsImage::new_from_buffer(&source, "")
-        .context("failed to decode source image")?;
+    let image = VipsImage::new_from_buffer(&source, "").context("failed to decode source image")?;
 
     let image = apply_crop(image, &params)?;
     let image = apply_resize(image, &params)?;
@@ -170,8 +166,8 @@ fn apply_flip(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vips
         "h" => ops::flip(&image, ops::Direction::Horizontal).context("flip horizontal failed"),
         "v" => ops::flip(&image, ops::Direction::Vertical).context("flip vertical failed"),
         "hv" | "vh" => {
-            let h = ops::flip(&image, ops::Direction::Horizontal)
-                .context("flip horizontal failed")?;
+            let h =
+                ops::flip(&image, ops::Direction::Horizontal).context("flip horizontal failed")?;
             ops::flip(&h, ops::Direction::Vertical).context("flip vertical failed")
         }
         _ => Ok(image),
@@ -311,7 +307,10 @@ mod tests {
         assert_eq!(mime, "image/jpeg");
         let (w, h) = image_dims(&out);
         assert_eq!(w, 32, "width should be exactly 32");
-        assert_eq!(h, 32, "height should be 32 (aspect ratio preserved for square source)");
+        assert_eq!(
+            h, 32,
+            "height should be 32 (aspect ratio preserved for square source)"
+        );
     }
 
     #[tokio::test]
@@ -364,7 +363,10 @@ mod tests {
         assert_eq!(mime, "image/jpeg");
         let (w, h) = image_dims(&out);
         assert_eq!(w, 32, "constrain: width must not exceed requested wid");
-        assert_eq!(h, 16, "constrain: height must preserve aspect ratio (32×16)");
+        assert_eq!(
+            h, 16,
+            "constrain: height must preserve aspect ratio (32×16)"
+        );
     }
 
     #[tokio::test]
@@ -396,7 +398,11 @@ mod tests {
         let (out, mime) = apply(bytes, params).await.unwrap();
         assert_eq!(mime, "image/jpeg");
         let (w, h) = image_dims(&out);
-        assert_eq!((w, h), (32, 32), "32×32 cropped region rotated 90° must stay 32×32");
+        assert_eq!(
+            (w, h),
+            (32, 32),
+            "32×32 cropped region rotated 90° must stay 32×32"
+        );
     }
 
     #[tokio::test]
@@ -425,6 +431,10 @@ mod tests {
         let (out, mime) = apply(bytes, params).await.unwrap();
         assert_eq!(mime, "image/avif");
         let (w, h) = image_dims(&out);
-        assert_eq!((w, h), (32, 32), "avif output must be constrained to requested width");
+        assert_eq!(
+            (w, h),
+            (32, 32),
+            "avif output must be constrained to requested width"
+        );
     }
 }
