@@ -8,7 +8,7 @@ use anyhow::Context;
 use libvips::{
     ops::{
         self, ForeignHeifCompression, HeifsaveBufferOptions, JpegsaveBufferOptions,
-        ResizeOptions, WebpsaveBufferOptions,
+        ResizeOptions,
     },
     VipsApp, VipsImage,
 };
@@ -183,14 +183,7 @@ fn encode(image: VipsImage, params: &TransformParams) -> anyhow::Result<(Vec<u8>
 
     match params.fmt.as_deref().unwrap_or("jpeg") {
         "webp" => {
-            let bytes = ops::webpsave_buffer_with_opts(
-                &image,
-                &WebpsaveBufferOptions {
-                    q: quality,
-                    ..Default::default()
-                },
-            )
-            .context("webp encode failed")?;
+            let bytes = webp_save_buffer(&image, quality).context("webp encode failed")?;
             Ok((bytes, "image/webp"))
         }
         "png" => {
@@ -224,6 +217,22 @@ fn encode(image: VipsImage, params: &TransformParams) -> anyhow::Result<(Vec<u8>
     }
 }
 
+// ---- Private helpers -------------------------------------------------------
+
+/// Encode `image` to a WebP buffer at the given quality.
+///
+/// The high-level [`ops::webpsave_buffer_with_opts`] passes options such as
+/// `smart-deblock` and `passes` that were introduced after libvips 8.15 and
+/// cause the C function to return an error on older installs.  Using
+/// [`VipsImage::image_write_to_buffer`] with an option-encoded suffix avoids
+/// this version skew while still honoring the requested quality.
+fn webp_save_buffer(image: &VipsImage, quality: i32) -> anyhow::Result<Vec<u8>> {
+    let suffix = format!(".webp[Q={}]", quality);
+    image
+        .image_write_to_buffer(&suffix)
+        .map_err(|e| anyhow::anyhow!("webp encode failed: {}", e))
+}
+
 // ---- Test helpers ----------------------------------------------------------
 
 /// Create a small solid-black RGB JPEG in memory.  Only compiled during tests.
@@ -240,6 +249,13 @@ pub(crate) fn test_jpeg(w: i32, h: i32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decode `bytes` with libvips and return `(width, height)`.
+    fn image_dims(bytes: &[u8]) -> (i32, i32) {
+        ensure_vips();
+        let img = VipsImage::new_from_buffer(bytes, "").expect("failed to decode output image");
+        (img.get_width(), img.get_height())
+    }
 
     #[test]
     fn default_params_are_all_none() {
@@ -278,10 +294,14 @@ mod tests {
         let (out, mime) = apply(bytes, TransformParams::default()).await.unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
+        // No resize params → source dimensions unchanged.
+        let (w, h) = image_dims(&out);
+        assert_eq!((w, h), (64, 64));
     }
 
     #[tokio::test]
     async fn resize_width_only() {
+        // 64×64 source, constrain to wid=32 (no hei) → 32×32 (aspect preserved).
         let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
@@ -289,11 +309,14 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params).await.unwrap();
         assert_eq!(mime, "image/jpeg");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 32, "width should be exactly 32");
+        assert_eq!(h, 32, "height should be 32 (aspect ratio preserved for square source)");
     }
 
     #[tokio::test]
     async fn resize_to_webp_with_quality() {
+        // 64×64 source, constrain to 32×32 → exactly 32×32.
         let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
@@ -304,11 +327,13 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params).await.unwrap();
         assert_eq!(mime, "image/webp");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!((w, h), (32, 32));
     }
 
     #[tokio::test]
     async fn crop_fit_fills_target_box() {
+        // 64×64 source, fit=crop → output must be exactly the requested dimensions.
         let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(20),
@@ -319,11 +344,49 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params).await.unwrap();
         assert_eq!(mime, "image/png");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 20, "crop fit: width must equal requested wid");
+        assert_eq!(h, 40, "crop fit: height must equal requested hei");
+    }
+
+    #[tokio::test]
+    async fn constrain_fit_preserves_aspect_ratio() {
+        // Non-square source: 64×32.  Constrain to a 32×32 box.
+        // scale = min(32/64, 32/32) = min(0.5, 1.0) = 0.5 → output 32×16.
+        let bytes = test_jpeg(64, 32);
+        let params = TransformParams {
+            wid: Some(32),
+            hei: Some(32),
+            fit: Some("constrain".to_string()),
+            ..Default::default()
+        };
+        let (out, mime) = apply(bytes, params).await.unwrap();
+        assert_eq!(mime, "image/jpeg");
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 32, "constrain: width must not exceed requested wid");
+        assert_eq!(h, 16, "constrain: height must preserve aspect ratio (32×16)");
+    }
+
+    #[tokio::test]
+    async fn stretch_fit_exact_dimensions() {
+        // fit=stretch must produce exactly the requested dimensions regardless of aspect ratio.
+        let bytes = test_jpeg(64, 64);
+        let params = TransformParams {
+            wid: Some(20),
+            hei: Some(40),
+            fit: Some("stretch".to_string()),
+            ..Default::default()
+        };
+        let (out, mime) = apply(bytes, params).await.unwrap();
+        assert_eq!(mime, "image/jpeg");
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 20, "stretch fit: width must equal requested wid");
+        assert_eq!(h, 40, "stretch fit: height must equal requested hei");
     }
 
     #[tokio::test]
     async fn pre_crop_and_rotate_90() {
+        // Pre-crop extracts a 32×32 region; rotating a square by 90° keeps 32×32.
         let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             crop: Some("0,0,32,32".to_string()),
@@ -332,11 +395,13 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params).await.unwrap();
         assert_eq!(mime, "image/jpeg");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!((w, h), (32, 32), "32×32 cropped region rotated 90° must stay 32×32");
     }
 
     #[tokio::test]
     async fn flip_both_axes() {
+        // Flipping does not change dimensions.
         let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             flip: Some("hv".to_string()),
@@ -344,7 +409,8 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params).await.unwrap();
         assert_eq!(mime, "image/jpeg");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!((w, h), (64, 64), "flip must not change image dimensions");
     }
 
     #[tokio::test]
@@ -358,6 +424,7 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params).await.unwrap();
         assert_eq!(mime, "image/avif");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!((w, h), (32, 32), "avif output must be constrained to requested width");
     }
 }
