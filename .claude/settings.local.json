@@ -5,7 +5,18 @@
       "Bash(npx markdownlint-cli:*)",
       "Bash(ls /Users/ivan/dev/rendition/.markdownlint*)",
       "Bash(ls /Users/ivan/dev/rendition/aidlc-docs/.markdownlint*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh run:*)",
+      "Bash(git fetch:*)",
+      "Bash(git checkout:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo test:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git push:*)"
     ]
   }
 }
