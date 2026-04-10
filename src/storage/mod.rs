@@ -72,25 +72,23 @@ impl LocalStorage {
 }
 
 impl StorageBackend for LocalStorage {
-    fn get(&self, path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send {
+    async fn get(&self, path: &str) -> anyhow::Result<Asset> {
         let full_path = self.root.join(path);
         let content_type = content_type_from_ext(path).to_string();
-        async move {
-            let data = tokio::fs::read(&full_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
-            let size = data.len();
-            Ok(Asset {
-                data,
-                content_type,
-                size,
-            })
-        }
+        let data = tokio::fs::read(&full_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
+        let size = data.len();
+        Ok(Asset {
+            data,
+            content_type,
+            size,
+        })
     }
 
-    fn exists(&self, path: &str) -> impl Future<Output = bool> + Send {
+    async fn exists(&self, path: &str) -> bool {
         let full_path = self.root.join(path);
-        async move { tokio::fs::metadata(&full_path).await.is_ok() }
+        tokio::fs::metadata(&full_path).await.is_ok()
     }
 }
 
@@ -117,12 +115,12 @@ impl S3Storage {
 }
 
 impl StorageBackend for S3Storage {
-    fn get(&self, _path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send {
-        async { todo!("S3Storage::get not yet implemented") }
+    async fn get(&self, _path: &str) -> anyhow::Result<Asset> {
+        todo!("S3Storage::get not yet implemented")
     }
 
-    fn exists(&self, _path: &str) -> impl Future<Output = bool> + Send {
-        async { todo!("S3Storage::exists not yet implemented") }
+    async fn exists(&self, _path: &str) -> bool {
+        todo!("S3Storage::exists not yet implemented")
     }
 }
 
