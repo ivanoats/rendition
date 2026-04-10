@@ -1,5 +1,13 @@
 # AI-DLC Audit Log
 
+## Units Generation — COMPLETED
+**Timestamp**: 2026-04-10T00:00:00Z
+**User Input**: "remember to always provide recommended answers and trade-off table when asking questions and allow me to continue with recommendations" + "continue"
+**AI Response**: Saved feedback memory for future AIDLC question format. Accepted all 3 unit decomposition recommendations (sequential development, testcontainers-rs, config-gated features). Generated unit-of-work.md (7 units with deliverables, acceptance criteria, entry/exit conditions), unit-of-work-dependency.md (matrix, Mermaid graph, dev sequence, inter-unit interfaces, NoopPresetStore stub strategy), unit-of-work-story-map.md (every FR/NFR/QA mapped to a unit with test type). All passed markdownlint. INCEPTION phase complete; ready for CONSTRUCTION.
+**Context**: Units Generation stage — completed; advancing to CONSTRUCTION (Unit 1: Config)
+
+---
+
 ## Application Design — COMPLETED
 **Timestamp**: 2026-04-09T01:30:00Z
 **User Input**: "accept all recommendations, document in ADRs and continue"

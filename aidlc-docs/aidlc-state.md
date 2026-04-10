@@ -3,7 +3,7 @@
 ## Project Information
 - **Project Type**: Brownfield
 - **Start Date**: 2026-04-09T00:00:00Z
-- **Current Stage**: INCEPTION - Units Generation
+- **Current Stage**: CONSTRUCTION - Per-Unit Loop (Unit 1: Config)
 
 ## Workspace State
 - **Existing Code**: Yes
@@ -36,4 +36,6 @@
   - **Artifacts Location**: aidlc-docs/inception/plans/execution-plan.md
 - [x] Application Design - COMPLETED (2026-04-09T01:30:00Z)
   - **Artifacts Location**: aidlc-docs/inception/application-design/
+- [x] Units Generation - COMPLETED (2026-04-10T00:00:00Z)
+  - **Artifacts Location**: aidlc-docs/inception/application-design/ (unit-of-work.md, unit-of-work-dependency.md, unit-of-work-story-map.md)
 - [ ] Units Generation - PENDING
