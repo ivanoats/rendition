@@ -108,7 +108,6 @@ mod tests {
     use axum::http::StatusCode;
     use axum_test::TestServer;
     use std::collections::HashMap;
-    use std::future::Future;
     use std::sync::Arc;
 
     use crate::storage::{Asset, StorageBackend};
@@ -131,22 +130,19 @@ mod tests {
     }
 
     impl StorageBackend for MockStorage {
-        fn get(&self, path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send {
-            let result = self
-                .0
+        async fn get(&self, path: &str) -> anyhow::Result<Asset> {
+            self.0
                 .get(path)
                 .map(|data| Asset {
                     size: data.len(),
                     content_type: crate::storage::content_type_from_ext(path).to_string(),
                     data: data.clone(),
                 })
-                .ok_or_else(|| anyhow::anyhow!("not found: {path}"));
-            async move { result }
+                .ok_or_else(|| anyhow::anyhow!("not found: {path}"))
         }
 
-        fn exists(&self, path: &str) -> impl Future<Output = bool> + Send {
-            let exists = self.0.contains_key(path);
-            async move { exists }
+        async fn exists(&self, path: &str) -> bool {
+            self.0.contains_key(path)
         }
     }
 

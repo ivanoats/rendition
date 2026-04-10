@@ -20,6 +20,11 @@ pub struct Asset {
 }
 
 /// Trait implemented by every storage backend.
+///
+/// Methods return `impl Future + Send` (RPITIT) so that callers in generic
+/// contexts (e.g. axum handlers) can rely on the futures being `Send` without
+/// requiring nightly Return Type Notation (RTN) to express that bound.
+/// Concrete `impl` blocks use `async fn` directly — Rust 1.75+ allows this.
 pub trait StorageBackend: Send + Sync {
     /// Retrieve an asset by its logical path (e.g. `"products/shoe.jpg"`).
     ///
@@ -72,25 +77,22 @@ impl LocalStorage {
 }
 
 impl StorageBackend for LocalStorage {
-    fn get(&self, path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send {
+    async fn get(&self, path: &str) -> anyhow::Result<Asset> {
         let full_path = self.root.join(path);
         let content_type = content_type_from_ext(path).to_string();
-        async move {
-            let data = tokio::fs::read(&full_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
-            let size = data.len();
-            Ok(Asset {
-                data,
-                content_type,
-                size,
-            })
-        }
+        let data = tokio::fs::read(&full_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
+        let size = data.len();
+        Ok(Asset {
+            data,
+            content_type,
+            size,
+        })
     }
 
-    fn exists(&self, path: &str) -> impl Future<Output = bool> + Send {
-        let full_path = self.root.join(path);
-        async move { tokio::fs::metadata(&full_path).await.is_ok() }
+    async fn exists(&self, path: &str) -> bool {
+        tokio::fs::metadata(self.root.join(path)).await.is_ok()
     }
 }
 
