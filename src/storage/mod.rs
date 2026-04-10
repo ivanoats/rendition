@@ -184,8 +184,14 @@ mod tests {
 
     #[test]
     fn content_type_unknown_falls_back_to_octet_stream() {
-        assert_eq!(content_type_from_ext("file.xyz"), "application/octet-stream");
-        assert_eq!(content_type_from_ext("noextension"), "application/octet-stream");
+        assert_eq!(
+            content_type_from_ext("file.xyz"),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            content_type_from_ext("noextension"),
+            "application/octet-stream"
+        );
     }
 
     // -- LocalStorage --------------------------------------------------------

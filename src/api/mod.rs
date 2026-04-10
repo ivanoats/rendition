@@ -63,7 +63,11 @@ where
     S: StorageBackend,
 {
     if !state.storage.exists(&asset_path).await {
-        return (StatusCode::NOT_FOUND, format!("asset not found: {asset_path}")).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            format!("asset not found: {asset_path}"),
+        )
+            .into_response();
     }
 
     let asset = match state.storage.get(&asset_path).await {
@@ -76,10 +80,7 @@ where
 
     match transform::apply(asset.data, params).await {
         Ok((bytes, content_type)) => (
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(content_type),
-            )],
+            [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
             bytes,
         )
             .into_response(),
@@ -178,7 +179,10 @@ mod tests {
         let jpeg = crate::transform::test_jpeg(32, 32);
         let server = make_server(MockStorage::empty().with_file("photo.jpg", jpeg));
 
-        let resp = server.get("/cdn/photo.jpg").add_query_param("fmt", "webp").await;
+        let resp = server
+            .get("/cdn/photo.jpg")
+            .add_query_param("fmt", "webp")
+            .await;
         assert_eq!(resp.status_code(), StatusCode::OK);
         assert_eq!(
             resp.headers()
@@ -242,7 +246,10 @@ mod tests {
         let jpeg = crate::transform::test_jpeg(32, 32);
         let server = make_server(MockStorage::empty().with_file("photo.jpg", jpeg));
 
-        let resp = server.get("/cdn/photo.jpg").add_query_param("fmt", "avif").await;
+        let resp = server
+            .get("/cdn/photo.jpg")
+            .add_query_param("fmt", "avif")
+            .await;
         assert_eq!(resp.status_code(), StatusCode::OK);
         assert_eq!(
             resp.headers()
@@ -257,7 +264,10 @@ mod tests {
         let jpeg = crate::transform::test_jpeg(32, 32);
         let server = make_server(MockStorage::empty().with_file("photo.jpg", jpeg));
 
-        let resp = server.get("/cdn/photo.jpg").add_query_param("fmt", "png").await;
+        let resp = server
+            .get("/cdn/photo.jpg")
+            .add_query_param("fmt", "png")
+            .await;
         assert_eq!(resp.status_code(), StatusCode::OK);
         assert_eq!(
             resp.headers()

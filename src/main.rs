@@ -18,8 +18,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Resolve asset root — override with RENDITION_ASSETS_PATH env var.
-    let assets_path =
-        std::env::var("RENDITION_ASSETS_PATH").unwrap_or_else(|_| "./assets".into());
+    let assets_path = std::env::var("RENDITION_ASSETS_PATH").unwrap_or_else(|_| "./assets".into());
     tracing::info!("Asset root: {assets_path}");
 
     let app = rendition::build_app(&assets_path);

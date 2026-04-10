@@ -28,4 +28,3 @@ pub fn build_app(assets_path: &str) -> Router {
 async fn health_check() -> Json<Value> {
     Json(json!({ "status": "ok", "service": "rendition" }))
 }
-
