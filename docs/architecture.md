@@ -9,6 +9,7 @@ modern alternative to Adobe Scene7.
 ## Level 1 — System Context
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "stepAfter", "diagramPadding": 40}}}%%
 C4Context
     title System Context — Rendition
 
@@ -22,6 +23,8 @@ C4Context
     Rel(client, rendition, "GET /cdn/{path}?wid=800&fmt=webp", "HTTPS")
     Rel(ops, rendition, "Sets RENDITION_ASSETS_PATH, RUST_LOG", "Environment")
     Rel(rendition, storage, "Fetches original media files", "File I/O / S3 API")
+
+    UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
 ```
 
 **Primary responsibilities:**
