@@ -7,8 +7,8 @@
 use anyhow::Context;
 use libvips::{
     ops::{
-        self, ForeignHeifCompression, HeifsaveBufferOptions, Interesting, JpegsaveBufferOptions,
-        ThumbnailImageOptions, WebpsaveBufferOptions,
+        self, ForeignHeifCompression, HeifsaveBufferOptions, JpegsaveBufferOptions,
+        ResizeOptions, WebpsaveBufferOptions,
     },
     VipsApp, VipsImage,
 };
@@ -45,7 +45,7 @@ pub struct TransformParams {
 static VIPS_APP: OnceLock<VipsApp> = OnceLock::new();
 
 /// Ensure libvips is initialised exactly once for the process lifetime.
-fn ensure_vips() {
+pub(crate) fn ensure_vips() {
     VIPS_APP.get_or_init(|| {
         VipsApp::new("rendition", false).expect("Cannot initialize libvips")
     });
@@ -112,32 +112,48 @@ fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vi
         return Ok(image);
     }
 
-    // A missing dimension becomes "unconstrained" (very large number).
-    let thumb_w = params.wid.map(|v| v as i32).unwrap_or(i32::MAX);
-    let thumb_h = params.hei.map(|v| v as i32).unwrap_or(i32::MAX);
+    let src_w = image.get_width() as f64;
+    let src_h = image.get_height() as f64;
     let fit = params.fit.as_deref().unwrap_or("constrain");
 
-    let opts = match fit {
-        "crop" => ThumbnailImageOptions {
-            height: thumb_h,
-            crop: Interesting::Centre,
-            ..Default::default()
-        },
-        "stretch" | "fill" => ThumbnailImageOptions {
-            height: thumb_h,
-            size: ops::Size::Force,
-            ..Default::default()
-        },
-        _ => {
-            // "constrain", "fit", or unrecognised → fit within the box
-            ThumbnailImageOptions {
-                height: thumb_h,
-                ..Default::default()
-            }
+    match fit {
+        "stretch" | "fill" => {
+            // Scale each axis independently to exactly fill the target box.
+            let target_w = params.wid.map(|v| v as f64).unwrap_or(src_w);
+            let target_h = params.hei.map(|v| v as f64).unwrap_or(src_h);
+            ops::resize_with_opts(
+                &image,
+                target_w / src_w,
+                &ResizeOptions {
+                    vscale: target_h / src_h,
+                    ..Default::default()
+                },
+            )
+            .context("resize (stretch) failed")
         }
-    };
-
-    ops::thumbnail_image_with_opts(&image, thumb_w, &opts).context("resize failed")
+        "crop" => {
+            // Scale to fill the target box, then center-crop to exact dimensions.
+            let target_w = params.wid.map(|v| v as f64).unwrap_or(src_w);
+            let target_h = params.hei.map(|v| v as f64).unwrap_or(src_h);
+            let scale = (target_w / src_w).max(target_h / src_h);
+            let scaled = ops::resize(&image, scale).context("resize (crop scale) failed")?;
+            let scaled_w = scaled.get_width();
+            let scaled_h = scaled.get_height();
+            let crop_x = ((scaled_w - target_w as i32) / 2).max(0);
+            let crop_y = ((scaled_h - target_h as i32) / 2).max(0);
+            let crop_w = (target_w as i32).min(scaled_w);
+            let crop_h = (target_h as i32).min(scaled_h);
+            ops::extract_area(&scaled, crop_x, crop_y, crop_w, crop_h)
+                .context("resize (crop extract) failed")
+        }
+        _ => {
+            // "constrain", "fit", or unrecognised → fit within the box preserving aspect ratio.
+            let target_w = params.wid.map(|v| v as f64).unwrap_or(f64::MAX);
+            let target_h = params.hei.map(|v| v as f64).unwrap_or(f64::MAX);
+            let scale = (target_w / src_w).min(target_h / src_h);
+            ops::resize(&image, scale).context("resize failed")
+        }
+    }
 }
 
 fn apply_rotation(image: VipsImage, params: &TransformParams) -> anyhow::Result<VipsImage> {
@@ -208,6 +224,17 @@ fn encode(image: VipsImage, params: &TransformParams) -> anyhow::Result<(Vec<u8>
     }
 }
 
+// ---- Test helpers ----------------------------------------------------------
+
+/// Create a small solid-black RGB JPEG in memory.  Only compiled during tests.
+#[cfg(test)]
+pub(crate) fn test_jpeg(w: i32, h: i32) -> Vec<u8> {
+    ensure_vips();
+    let image = ops::black_with_opts(w, h, &BlackOptions { bands: 3 })
+        .expect("failed to create test image");
+    ops::jpegsave_buffer(&image).expect("failed to encode test JPEG")
+}
+
 // ---- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
@@ -245,30 +272,17 @@ mod tests {
         assert_eq!(p.flip.as_deref(), Some("h"));
     }
 
-    // Helper: create a small 3-band (RGB) JPEG in memory using libvips.
-    fn make_test_jpeg(w: i32, h: i32) -> Vec<u8> {
-        ensure_vips();
-        let image = ops::black_with_opts(w, h, &BlackOptions { bands: 3 })
-            .expect("failed to create test image");
-        ops::jpegsave_buffer(&image).expect("failed to encode test image as JPEG")
-    }
-
-    // The tests below require libvips to be installed on the system.
-    // Run with: cargo test -- --include-ignored
-
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn passthrough_returns_jpeg() {
-        let bytes = make_test_jpeg(64, 64);
+        let bytes = test_jpeg(64, 64);
         let (out, mime) = apply(bytes, TransformParams::default()).await.unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn resize_width_only() {
-        let bytes = make_test_jpeg(64, 64);
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
             ..Default::default()
@@ -279,9 +293,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn resize_to_webp_with_quality() {
-        let bytes = make_test_jpeg(64, 64);
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
             hei: Some(32),
@@ -295,9 +308,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn crop_fit_fills_target_box() {
-        let bytes = make_test_jpeg(64, 64);
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(20),
             hei: Some(40),
@@ -311,9 +323,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn pre_crop_and_rotate_90() {
-        let bytes = make_test_jpeg(64, 64);
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             crop: Some("0,0,32,32".to_string()),
             rotate: Some(90),
@@ -325,9 +336,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn flip_both_axes() {
-        let bytes = make_test_jpeg(64, 64);
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             flip: Some("hv".to_string()),
             ..Default::default()
@@ -338,9 +348,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn avif_encode() {
-        let bytes = make_test_jpeg(64, 64);
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
             fmt: Some("avif".to_string()),
