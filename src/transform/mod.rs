@@ -150,7 +150,7 @@ fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vi
             // "constrain", "fit", or unrecognised → fit within the box preserving aspect ratio.
             let target_w = params.wid.map(|v| v as f64).unwrap_or(f64::MAX);
             let target_h = params.hei.map(|v| v as f64).unwrap_or(f64::MAX);
-            let scale = (target_w / src_w).min(target_h / src_h);
+            let scale = (target_w / src_w).min(target_h / src_h).min(1.0);
             ops::resize(&image, scale).context("resize failed")
         }
     }
