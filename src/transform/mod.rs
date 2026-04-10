@@ -4,7 +4,7 @@
 //! format conversion, quality adjustment.  Built on libvips for fast,
 //! memory-efficient processing of large images.
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 #[cfg(test)]
 use libvips::ops::BlackOptions;
 use libvips::{
@@ -13,6 +13,7 @@ use libvips::{
     },
     VipsApp, VipsImage,
 };
+use std::ffi::CString;
 use std::sync::OnceLock;
 
 /// Parameters parsed from a Rendition transform URL.
@@ -46,6 +47,49 @@ static VIPS_APP: OnceLock<VipsApp> = OnceLock::new();
 /// Ensure libvips is initialised exactly once for the process lifetime.
 pub(crate) fn ensure_vips() {
     VIPS_APP.get_or_init(|| VipsApp::new("rendition", false).expect("Cannot initialize libvips"));
+}
+
+// ---- Format capability detection -------------------------------------------
+//
+// libvips can be built with or without optional savers (HEIF/AVIF, JXL, etc.).
+// Calling a saver that is not registered causes the underlying C function to
+// return NULL, and the `libvips` crate (1.7.3) constructs a `Vec` from that
+// NULL pointer without checking — triggering an unrecoverable, non-unwinding
+// `SIGABRT` via Rust's UB checks.
+//
+// To avoid this we probe support before invoking the saver. The probe uses
+// `vips_foreign_find_save_buffer`, which is a pure capability check: it
+// returns the saver function name (non-null) if a saver exists for the
+// given suffix, or NULL otherwise. It does not invoke the saver itself,
+// so it cannot trigger the `new_byte_array` bug.
+
+/// Returns `true` if libvips on this host can save AVIF images.
+///
+/// The result is cached after the first call.
+pub fn avif_supported() -> bool {
+    static AVIF: OnceLock<bool> = OnceLock::new();
+    *AVIF.get_or_init(|| save_buffer_supported(".avif"))
+}
+
+/// Returns `true` if libvips on this host can save WebP images.
+///
+/// The result is cached after the first call.
+pub fn webp_supported() -> bool {
+    static WEBP: OnceLock<bool> = OnceLock::new();
+    *WEBP.get_or_init(|| save_buffer_supported(".webp"))
+}
+
+fn save_buffer_supported(suffix: &str) -> bool {
+    ensure_vips();
+    let Ok(c_suffix) = CString::new(suffix) else {
+        return false;
+    };
+    // SAFETY: `vips_foreign_find_save_buffer` is a pure capability lookup.
+    // It accepts a null-terminated suffix and returns either a pointer to
+    // a static C string (the saver function name) or NULL. We never
+    // dereference the returned pointer; we only check whether it is null.
+    let ptr = unsafe { libvips::bindings::vips_foreign_find_save_buffer(c_suffix.as_ptr()) };
+    !ptr.is_null()
 }
 
 // ---- Public API ------------------------------------------------------------
@@ -201,6 +245,11 @@ fn encode(
 
     match params.fmt.as_deref().unwrap_or(default_fmt) {
         "webp" => {
+            if !webp_supported() {
+                return Err(anyhow!(
+                    "webp encoding is not supported by this libvips build"
+                ));
+            }
             let bytes = webp_save_buffer(&image, quality).context("webp encode failed")?;
             Ok((bytes, "image/webp"))
         }
@@ -209,6 +258,17 @@ fn encode(
             Ok((bytes, "image/png"))
         }
         "avif" => {
+            // Critical: probe AVIF support BEFORE calling heifsave_buffer.
+            // libvips returns NULL when AVIF support is missing (e.g. no AV1
+            // encoder linked into libheif), and the libvips Rust crate then
+            // constructs a Vec from a null pointer — triggering an
+            // unrecoverable SIGABRT via Rust's UB checks. We must not let
+            // the call happen at all in that case.
+            if !avif_supported() {
+                return Err(anyhow!(
+                    "avif encoding is not supported by this libvips build"
+                ));
+            }
             let bytes = ops::heifsave_buffer_with_opts(
                 &image,
                 &HeifsaveBufferOptions {
@@ -445,6 +505,10 @@ mod tests {
 
     #[tokio::test]
     async fn avif_encode() {
+        if !avif_supported() {
+            eprintln!("skipping avif_encode: libvips on this host has no AVIF saver");
+            return;
+        }
         let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
@@ -459,6 +523,28 @@ mod tests {
             (w, h),
             (32, 32),
             "avif output must be constrained to requested width"
+        );
+    }
+
+    #[tokio::test]
+    async fn avif_encode_returns_error_when_unsupported() {
+        // Inverse of avif_encode: when libvips lacks AVIF support, the
+        // encode call must return a typed error rather than letting
+        // libvips's heifsave_buffer return NULL and trigger an unrecoverable
+        // SIGABRT inside the libvips Rust crate's `new_byte_array`.
+        if avif_supported() {
+            eprintln!("skipping unsupported-avif test: libvips on this host has an AVIF saver");
+            return;
+        }
+        let bytes = test_jpeg(32, 32);
+        let params = TransformParams {
+            fmt: Some("avif".to_string()),
+            ..Default::default()
+        };
+        let err = apply(bytes, params, "image/jpeg").await.unwrap_err();
+        assert!(
+            err.to_string().contains("avif encoding is not supported"),
+            "expected avif unsupported error, got: {err}"
         );
     }
 }

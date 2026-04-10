@@ -86,7 +86,14 @@ where
             .into_response(),
         Err(err) => {
             tracing::error!("transform error for {asset_path}: {err:#}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "transform failed").into_response()
+            // Map "format unsupported by this libvips build" errors to 415,
+            // distinguishing client-driven format requests from server faults.
+            let msg = err.to_string();
+            if msg.contains("is not supported by this libvips build") {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, "format not supported").into_response()
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, "transform failed").into_response()
+            }
         }
     }
 }
@@ -243,6 +250,14 @@ mod tests {
 
     #[tokio::test]
     async fn fmt_avif_returns_avif_content_type() {
+        // libvips on some hosts (notably default Ubuntu builds) lacks an AV1
+        // encoder linked into libheif. We probe at runtime and skip the
+        // assertion path that would otherwise return 415.
+        if !crate::transform::avif_supported() {
+            eprintln!("skipping fmt_avif test: libvips on this host has no AVIF saver");
+            return;
+        }
+
         let jpeg = crate::transform::test_jpeg(32, 32);
         let server = make_server(MockStorage::empty().with_file("photo.jpg", jpeg));
 
@@ -257,6 +272,26 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("image/avif")
         );
+    }
+
+    #[tokio::test]
+    async fn fmt_avif_unsupported_returns_415() {
+        // The complement of the test above: when libvips lacks AVIF support,
+        // a request for fmt=avif must return 415 Unsupported Media Type
+        // rather than 500 or (worse) aborting the process.
+        if crate::transform::avif_supported() {
+            eprintln!("skipping unsupported-avif test: libvips on this host has an AVIF saver");
+            return;
+        }
+
+        let jpeg = crate::transform::test_jpeg(32, 32);
+        let server = make_server(MockStorage::empty().with_file("photo.jpg", jpeg));
+
+        let resp = server
+            .get("/cdn/photo.jpg")
+            .add_query_param("fmt", "avif")
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
     #[tokio::test]
