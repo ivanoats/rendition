@@ -309,7 +309,9 @@ mod tests {
     #[tokio::test]
     async fn passthrough_returns_jpeg() {
         let bytes = test_jpeg(64, 64);
-        let (out, mime) = apply(bytes, TransformParams::default(), "image/jpeg").await.unwrap();
+        let (out, mime) = apply(bytes, TransformParams::default(), "image/jpeg")
+            .await
+            .unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
         // No resize params → source dimensions unchanged.
