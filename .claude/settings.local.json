@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(markdownlint:*)",
+      "Bash(npx markdownlint-cli:*)",
+      "Bash(ls /Users/ivan/dev/rendition/.markdownlint*)",
+      "Bash(ls /Users/ivan/dev/rendition/aidlc-docs/.markdownlint*)"
+    ]
+  }
+}

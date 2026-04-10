@@ -19,11 +19,20 @@
 - **Structure patterns**: See code-generation.md Critical Rules
 
 ## Extension Configuration
-- **Security Baseline**: Pending opt-in
-- **Property-Based Testing**: Pending opt-in
+
+| Extension              | Enabled | Decided At              |
+|------------------------|---------|-------------------------|
+| Security Baseline      | Yes     | Requirements Analysis   |
+| Property-Based Testing | Yes     | Requirements Analysis   |
 
 ## Stage Progress
+
 - [x] Workspace Detection - COMPLETED (2026-04-09T00:00:00Z)
-- [ ] Reverse Engineering - PENDING
-- [ ] Requirements Analysis - PENDING
-- [ ] Workflow Planning - PENDING
+- [x] Reverse Engineering - COMPLETED (2026-04-09T00:00:00Z)
+  - **Artifacts Location**: aidlc-docs/inception/reverse-engineering/
+- [x] Requirements Analysis - COMPLETED (2026-04-09T00:03:00Z)
+  - **Artifacts Location**: aidlc-docs/inception/requirements/
+- [x] Workflow Planning - COMPLETED (2026-04-09T00:08:00Z)
+  - **Artifacts Location**: aidlc-docs/inception/plans/execution-plan.md
+- [ ] Application Design - PENDING
+- [ ] Units Generation - PENDING
