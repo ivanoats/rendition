@@ -99,6 +99,10 @@ async fn cdn_converts_to_webp() {
 
 #[tokio::test]
 async fn cdn_converts_to_avif() {
+    if !rendition::transform::avif_supported() {
+        eprintln!("skipping cdn_converts_to_avif: libvips on this host has no AVIF saver");
+        return;
+    }
     let (_dir, server) = setup();
     let resp = server
         .get("/cdn/sample.jpg")
