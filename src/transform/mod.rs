@@ -309,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn passthrough_returns_jpeg() {
         let bytes = test_jpeg(64, 64);
-        let (out, mime) = apply(bytes, TransformParams::default()).await.unwrap();
+        let (out, mime) = apply(bytes, TransformParams::default(), "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
         // No resize params → source dimensions unchanged.
@@ -381,7 +381,7 @@ mod tests {
             fit: Some("constrain".to_string()),
             ..Default::default()
         };
-        let (out, mime) = apply(bytes, params).await.unwrap();
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
         let (w, h) = image_dims(&out);
         assert_eq!(w, 32, "constrain: width must not exceed requested wid");
@@ -401,7 +401,7 @@ mod tests {
             fit: Some("stretch".to_string()),
             ..Default::default()
         };
-        let (out, mime) = apply(bytes, params).await.unwrap();
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
         let (w, h) = image_dims(&out);
         assert_eq!(w, 20, "stretch fit: width must equal requested wid");

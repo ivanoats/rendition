@@ -117,12 +117,12 @@ impl S3Storage {
 }
 
 impl StorageBackend for S3Storage {
-    fn get(&self, _path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send {
-        async { todo!("S3Storage::get not yet implemented") }
+    async fn get(&self, _path: &str) -> anyhow::Result<Asset> {
+        todo!("S3Storage::get not yet implemented")
     }
 
-    fn exists(&self, _path: &str) -> impl Future<Output = bool> + Send {
-        async { todo!("S3Storage::exists not yet implemented") }
+    async fn exists(&self, _path: &str) -> bool {
+        todo!("S3Storage::exists not yet implemented")
     }
 }
 
