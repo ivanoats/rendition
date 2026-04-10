@@ -4,20 +4,26 @@
 //! same router construction logic.
 
 pub mod api;
+pub mod config;
 pub mod storage;
 pub mod transform;
 
 use api::AppState;
 use axum::{routing::get, Json, Router};
+use config::AppConfig;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use storage::LocalStorage;
 use tower_http::trace::TraceLayer;
 
-/// Build the Axum application router wired to [`LocalStorage`] at `assets_path`.
-pub fn build_app(assets_path: &str) -> Router {
+/// Build the Axum application router from a loaded [`AppConfig`].
+///
+/// For Unit 1 only `assets_path` is read from the config; subsequent units
+/// (S3 backend, transform cache, embargo, middleware, observability) will
+/// extend this function to wire their components into the router.
+pub fn build_app(config: &AppConfig) -> Router {
     let state = AppState {
-        storage: Arc::new(LocalStorage::new(assets_path)),
+        storage: Arc::new(LocalStorage::new(&config.assets_path)),
     };
     Router::new()
         .route("/health", get(health_check))
