@@ -4,13 +4,17 @@
 //! the same router construction logic.
 
 pub mod api;
+pub mod cache;
 pub mod config;
+pub mod metrics;
 pub mod storage;
 pub mod transform;
 
 use api::AppState;
 use axum::{routing::get, Json, Router};
+use cache::MokaTransformCache;
 use config::{AppConfig, StorageBackendKind};
+use metrics::Metrics;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use storage::{LocalStorage, S3Storage, StorageBackend};
@@ -28,28 +32,39 @@ pub enum AppBuildError {
 /// Build the Axum application router from a loaded [`AppConfig`].
 ///
 /// Unit 2: `storage_backend` selects between the local filesystem and
-/// S3 adapters. Subsequent units (cache, embargo, middleware,
-/// observability) will extend this wiring point.
+/// S3 adapters. Unit 3 wires the in-process transform cache and metrics.
 pub async fn build_app(config: &AppConfig) -> Result<Router, AppBuildError> {
+    let cache = Arc::new(MokaTransformCache::new(
+        config.cache_max_entries,
+        config.cache_ttl(),
+    ));
+    let metrics = Arc::new(Metrics::new());
+
     let router = match config.storage_backend {
         StorageBackendKind::Local => {
             let storage = LocalStorage::new(&config.assets_path, config.local_timeout_ms);
-            wire_router(storage)
+            wire_router(storage, cache, metrics)
         }
         StorageBackendKind::S3 => {
             let storage = S3Storage::new(&config.s3).await?;
-            wire_router(storage)
+            wire_router(storage, cache, metrics)
         }
     };
     Ok(router)
 }
 
-fn wire_router<S>(storage: S) -> Router
+fn wire_router<S>(
+    storage: S,
+    cache: Arc<dyn cache::TransformCache>,
+    metrics: Arc<Metrics>,
+) -> Router
 where
     S: StorageBackend + Clone + Send + Sync + 'static,
 {
     let state = AppState {
         storage: Arc::new(storage),
+        cache,
+        metrics,
     };
     Router::new()
         .route("/health", get(health_check))
