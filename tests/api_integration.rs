@@ -14,6 +14,12 @@ fn make_server() -> TestServer {
     TestServer::new(app).unwrap()
 }
 
+/// Decode PNG bytes and return `(width, height)`.
+fn png_dims(bytes: &[u8]) -> (u32, u32) {
+    let img = image::load_from_memory(bytes).expect("failed to decode image");
+    (img.width(), img.height())
+}
+
 // ---------------------------------------------------------------------------
 // Health check
 // ---------------------------------------------------------------------------
@@ -69,31 +75,59 @@ async fn cdn_fmt_webp_returns_200_with_webp_content_type() {
 }
 
 #[tokio::test]
-async fn cdn_resize_width_returns_200() {
+async fn cdn_resize_width_returns_correct_dimensions() {
     let server = make_server();
-    server
+
+    // Capture the original dimensions.
+    let orig_resp = server.get("/cdn/sample.png").await;
+    orig_resp.assert_status_ok();
+    let (orig_w, _orig_h) = png_dims(orig_resp.as_bytes());
+
+    // Request a width smaller than the original.
+    let target_w: u32 = (orig_w / 2).max(1);
+    let resp = server
         .get("/cdn/sample.png")
-        .add_query_params(&[("wid", "50")])
-        .await
-        .assert_status_ok();
+        .add_query_params(&[("wid", &target_w.to_string())])
+        .await;
+    resp.assert_status_ok();
+    let (out_w, _out_h) = png_dims(resp.as_bytes());
+    assert_eq!(out_w, target_w, "output width should equal the requested width");
 }
 
 #[tokio::test]
-async fn cdn_resize_crop_returns_200() {
+async fn cdn_resize_crop_returns_exact_dimensions() {
     let server = make_server();
-    server
+    let resp = server
         .get("/cdn/sample.png")
-        .add_query_params(&[("wid", "50"), ("hei", "50"), ("fit", "crop")])
-        .await
-        .assert_status_ok();
+        .add_query_params(&[("wid", "30"), ("hei", "20"), ("fit", "crop")])
+        .await;
+    resp.assert_status_ok();
+    let (out_w, out_h) = png_dims(resp.as_bytes());
+    assert_eq!(out_w, 30, "cropped width should be exactly 30");
+    assert_eq!(out_h, 20, "cropped height should be exactly 20");
 }
 
 #[tokio::test]
-async fn cdn_rotate_returns_200() {
+async fn cdn_rotate_90_swaps_dimensions() {
     let server = make_server();
-    server
+
+    let orig_resp = server.get("/cdn/sample.png").await;
+    orig_resp.assert_status_ok();
+    let (orig_w, orig_h) = png_dims(orig_resp.as_bytes());
+
+    let rotated_resp = server
         .get("/cdn/sample.png")
         .add_query_params(&[("rotate", "90")])
-        .await
-        .assert_status_ok();
+        .await;
+    rotated_resp.assert_status_ok();
+    let (rot_w, rot_h) = png_dims(rotated_resp.as_bytes());
+
+    assert_eq!(
+        rot_w, orig_h,
+        "rotated width should equal original height"
+    );
+    assert_eq!(
+        rot_h, orig_w,
+        "rotated height should equal original width"
+    );
 }

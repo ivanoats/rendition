@@ -123,21 +123,32 @@ fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vi
     let orig_h = image.get_height() as f64;
     let fit = params.fit.as_deref().unwrap_or("constrain");
 
-    // Scale factors for each axis; an unspecified dimension is unconstrained.
-    let sx = params.wid.map(|w| w as f64 / orig_w).unwrap_or(f64::MAX);
-    let sy = params.hei.map(|h| h as f64 / orig_h).unwrap_or(f64::MAX);
+    // Scale factors: only computed for dimensions that are explicitly provided.
+    let sx = params.wid.map(|w| w as f64 / orig_w);
+    let sy = params.hei.map(|h| h as f64 / orig_h);
 
     let (hscale, vscale) = match fit {
         // Fill the box and crop — scale up to the larger factor.
+        // When only one dimension is given, scale uniformly by that factor.
         "crop" => {
-            let s = sx.max(sy);
+            let s = match (sx, sy) {
+                (Some(x), Some(y)) => x.max(y),
+                (Some(x), None) | (None, Some(x)) => x,
+                (None, None) => return Ok(image),
+            };
             (s, s)
         }
         // Stretch each axis independently.
-        "stretch" | "fill" => (sx, sy),
+        // When a dimension is absent, do not scale that axis (factor = 1.0).
+        "stretch" | "fill" => (sx.unwrap_or(1.0), sy.unwrap_or(1.0)),
         // Constrain / fit within the box — scale by the smaller factor.
+        // When only one dimension is given, scale uniformly by that factor.
         _ => {
-            let s = sx.min(sy);
+            let s = match (sx, sy) {
+                (Some(x), Some(y)) => x.min(y),
+                (Some(x), None) | (None, Some(x)) => x,
+                (None, None) => return Ok(image),
+            };
             (s, s)
         }
     };

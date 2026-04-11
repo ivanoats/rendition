@@ -20,3 +20,5 @@ libvips = "1.7.3"
 
 [dev-dependencies]
 axum-test = "14"
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }

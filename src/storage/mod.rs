@@ -175,45 +175,43 @@ mod tests {
 
     #[tokio::test]
     async fn local_storage_get_existing_file() {
-        let dir = std::env::temp_dir();
+        let dir = tempfile::tempdir().unwrap();
         let filename = "rendition_test_get_existing.png";
-        let file_path = dir.join(filename);
+        let file_path = dir.path().join(filename);
         let data = b"fake png bytes";
         tokio::fs::write(&file_path, data).await.unwrap();
 
-        let storage = LocalStorage::new(&dir);
+        let storage = LocalStorage::new(dir.path());
         let asset = storage.get(filename).await.unwrap();
 
         assert_eq!(asset.data, data);
         assert_eq!(asset.content_type, "image/png");
         assert_eq!(asset.size, data.len());
-
-        tokio::fs::remove_file(&file_path).await.ok();
     }
 
     #[tokio::test]
     async fn local_storage_get_missing_file() {
-        let storage = LocalStorage::new(std::env::temp_dir());
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path());
         let result = storage.get("rendition_test_does_not_exist_xyz.png").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn local_storage_exists_true() {
-        let dir = std::env::temp_dir();
+        let dir = tempfile::tempdir().unwrap();
         let filename = "rendition_test_exists_true.png";
-        let file_path = dir.join(filename);
+        let file_path = dir.path().join(filename);
         tokio::fs::write(&file_path, b"data").await.unwrap();
 
-        let storage = LocalStorage::new(&dir);
+        let storage = LocalStorage::new(dir.path());
         assert!(storage.exists(filename).await);
-
-        tokio::fs::remove_file(&file_path).await.ok();
     }
 
     #[tokio::test]
     async fn local_storage_exists_false() {
-        let storage = LocalStorage::new(std::env::temp_dir());
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path());
         assert!(!storage.exists("rendition_test_absent_xyz.png").await);
     }
 }
