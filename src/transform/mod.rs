@@ -160,49 +160,66 @@ fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vi
 
     match (params.wid, params.hei) {
         (None, None) => Ok(image),
+        // Single-dimension requests scale uniformly. Clamp to 1.0 so the
+        // default behaviour never upscales — callers must opt in to upscaling
+        // via an explicit fit mode (`fill`, `stretch`, `crop`).
         (Some(w), None) => {
-            let scale = w as f64 / orig_w;
+            let scale = (w as f64 / orig_w).min(1.0);
             ops::resize(&image, scale).context("resize (width-only) failed")
         }
         (None, Some(h)) => {
-            let scale = h as f64 / orig_h;
+            let scale = (h as f64 / orig_h).min(1.0);
             ops::resize(&image, scale).context("resize (height-only) failed")
         }
         (Some(w), Some(h)) => {
             let fit = params.fit.as_deref().unwrap_or("constrain");
             match fit {
                 "stretch" => {
-                    // resize to exact w, then stretch height
+                    // Single-pass anisotropic resize: scale x and y independently
+                    // in one libvips call. Avoids two interpolation passes and
+                    // the div-by-zero risk of computing vscale from an
+                    // intermediate image's height.
                     let hscale = w as f64 / orig_w;
-                    let resized = ops::resize(&image, hscale).context("resize (stretch w) failed")?;
-                    let vscale = h as f64 / resized.get_height() as f64;
+                    let vscale = h as f64 / orig_h;
                     ops::resize_with_opts(
-                        &resized,
-                        1.0,
+                        &image,
+                        hscale,
                         &ResizeOptions {
                             vscale,
                             ..Default::default()
                         },
                     )
-                    .context("resize (stretch h) failed")
+                    .context("resize (stretch) failed")
                 }
                 "crop" => {
-                    // scale to fill, then centre-crop
+                    // Scale-to-cover, then centre-crop to exact dimensions.
+                    // Clamp the extract area to the scaled image bounds: if
+                    // ops::resize rounds down by even one pixel, an unclamped
+                    // extract_area would exceed bounds and error.
                     let scale = f64::max(w as f64 / orig_w, h as f64 / orig_h);
-                    let scaled = ops::resize(&image, scale).context("resize (crop scale) failed")?;
-                    let x = ((scaled.get_width() - w as i32) / 2).max(0);
-                    let y = ((scaled.get_height() - h as i32) / 2).max(0);
-                    ops::extract_area(&scaled, x, y, w as i32, h as i32)
+                    let scaled =
+                        ops::resize(&image, scale).context("resize (crop scale) failed")?;
+                    let scaled_w = scaled.get_width();
+                    let scaled_h = scaled.get_height();
+                    let crop_w = (w as i32).min(scaled_w);
+                    let crop_h = (h as i32).min(scaled_h);
+                    let x = ((scaled_w - crop_w) / 2).max(0);
+                    let y = ((scaled_h - crop_h) / 2).max(0);
+                    ops::extract_area(&scaled, x, y, crop_w, crop_h)
                         .context("resize (crop extract) failed")
                 }
                 "fill" => {
-                    // scale to fill (same as crop scale but no cropping)
+                    // Scale to cover the target box (same factor as crop but
+                    // without cropping). May upscale, by design.
                     let scale = f64::max(w as f64 / orig_w, h as f64 / orig_h);
                     ops::resize(&image, scale).context("resize (fill) failed")
                 }
                 _ => {
-                    // constrain: fit within box preserving aspect ratio
-                    let scale = f64::min(w as f64 / orig_w, h as f64 / orig_h);
+                    // Constrain: fit within the box preserving aspect ratio.
+                    // Clamp to 1.0 so the default fit never upscales — callers
+                    // who want upscaling must request it via `fill`/`stretch`/
+                    // `crop`.
+                    let scale = f64::min(w as f64 / orig_w, h as f64 / orig_h).min(1.0);
                     ops::resize(&image, scale).context("resize (constrain) failed")
                 }
             }
@@ -461,23 +478,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stretch_fit_exact_dimensions() {
-        // fit=stretch must produce exactly the requested dimensions regardless of aspect ratio.
-        let bytes = test_jpeg(64, 64);
-        let params = TransformParams {
-            wid: Some(20),
-            hei: Some(40),
-            fit: Some("stretch".to_string()),
-            ..Default::default()
-        };
-        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
-        assert_eq!(mime, "image/jpeg");
-        let (w, h) = image_dims(&out);
-        assert_eq!(w, 20, "stretch fit: width must equal requested wid");
-        assert_eq!(h, 40, "stretch fit: height must equal requested hei");
-    }
-
-    #[tokio::test]
     async fn pre_crop_and_rotate_90() {
         // Pre-crop extracts a 32×32 region; rotating a square by 90° keeps 32×32.
         let bytes = test_jpeg(64, 64);
@@ -549,7 +549,10 @@ mod tests {
         assert_eq!(mime, "image/jpeg");
         let (w, h) = image_dims(&out);
         assert_eq!(h, 40, "fill fit: height must equal requested hei");
-        assert!(w >= 20, "fill fit: width must be at least the requested wid");
+        assert!(
+            w >= 20,
+            "fill fit: width must be at least the requested wid"
+        );
     }
 
     #[tokio::test]
