@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Disable the rustc-wrapper set in .cargo/config.toml: sccache is a
+  # local-developer optimisation and is not installed on CI runners.
+  CARGO_BUILD_RUSTC_WRAPPER: ""
 
 jobs:
   build-and-test:
