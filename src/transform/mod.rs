@@ -155,50 +155,57 @@ fn apply_crop(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vips
 }
 
 fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<VipsImage> {
-    if params.wid.is_none() && params.hei.is_none() {
-        return Ok(image);
-    }
+    let orig_w = image.get_width() as f64;
+    let orig_h = image.get_height() as f64;
 
-    let src_w = image.get_width() as f64;
-    let src_h = image.get_height() as f64;
-    let fit = params.fit.as_deref().unwrap_or("constrain");
-
-    match fit {
-        "stretch" | "fill" => {
-            // Scale each axis independently to exactly fill the target box.
-            let target_w = params.wid.map(|v| v as f64).unwrap_or(src_w);
-            let target_h = params.hei.map(|v| v as f64).unwrap_or(src_h);
-            ops::resize_with_opts(
-                &image,
-                target_w / src_w,
-                &ResizeOptions {
-                    vscale: target_h / src_h,
-                    ..Default::default()
-                },
-            )
-            .context("resize (stretch) failed")
+    match (params.wid, params.hei) {
+        (None, None) => Ok(image),
+        (Some(w), None) => {
+            let scale = w as f64 / orig_w;
+            ops::resize(&image, scale).context("resize (width-only) failed")
         }
-        "crop" => {
-            // Scale to fill the target box, then center-crop to exact dimensions.
-            let target_w = params.wid.map(|v| v as f64).unwrap_or(src_w);
-            let target_h = params.hei.map(|v| v as f64).unwrap_or(src_h);
-            let scale = (target_w / src_w).max(target_h / src_h);
-            let scaled = ops::resize(&image, scale).context("resize (crop scale) failed")?;
-            let scaled_w = scaled.get_width();
-            let scaled_h = scaled.get_height();
-            let crop_x = ((scaled_w - target_w as i32) / 2).max(0);
-            let crop_y = ((scaled_h - target_h as i32) / 2).max(0);
-            let crop_w = (target_w as i32).min(scaled_w);
-            let crop_h = (target_h as i32).min(scaled_h);
-            ops::extract_area(&scaled, crop_x, crop_y, crop_w, crop_h)
-                .context("resize (crop extract) failed")
+        (None, Some(h)) => {
+            let scale = h as f64 / orig_h;
+            ops::resize(&image, scale).context("resize (height-only) failed")
         }
-        _ => {
-            // "constrain", "fit", or unrecognised → fit within the box preserving aspect ratio.
-            let target_w = params.wid.map(|v| v as f64).unwrap_or(f64::MAX);
-            let target_h = params.hei.map(|v| v as f64).unwrap_or(f64::MAX);
-            let scale = (target_w / src_w).min(target_h / src_h).min(1.0);
-            ops::resize(&image, scale).context("resize failed")
+        (Some(w), Some(h)) => {
+            let fit = params.fit.as_deref().unwrap_or("constrain");
+            match fit {
+                "stretch" => {
+                    // resize to exact w, then stretch height
+                    let hscale = w as f64 / orig_w;
+                    let resized = ops::resize(&image, hscale).context("resize (stretch w) failed")?;
+                    let vscale = h as f64 / resized.get_height() as f64;
+                    ops::resize_with_opts(
+                        &resized,
+                        1.0,
+                        &ResizeOptions {
+                            vscale,
+                            ..Default::default()
+                        },
+                    )
+                    .context("resize (stretch h) failed")
+                }
+                "crop" => {
+                    // scale to fill, then centre-crop
+                    let scale = f64::max(w as f64 / orig_w, h as f64 / orig_h);
+                    let scaled = ops::resize(&image, scale).context("resize (crop scale) failed")?;
+                    let x = ((scaled.get_width() - w as i32) / 2).max(0);
+                    let y = ((scaled.get_height() - h as i32) / 2).max(0);
+                    ops::extract_area(&scaled, x, y, w as i32, h as i32)
+                        .context("resize (crop extract) failed")
+                }
+                "fill" => {
+                    // scale to fill (same as crop scale but no cropping)
+                    let scale = f64::max(w as f64 / orig_w, h as f64 / orig_h);
+                    ops::resize(&image, scale).context("resize (fill) failed")
+                }
+                _ => {
+                    // constrain: fit within box preserving aspect ratio
+                    let scale = f64::min(w as f64 / orig_w, h as f64 / orig_h);
+                    ops::resize(&image, scale).context("resize (constrain) failed")
+                }
+            }
         }
     }
 }
@@ -524,6 +531,42 @@ mod tests {
             (32, 32),
             "avif output must be constrained to requested width"
         );
+    }
+
+    #[tokio::test]
+    async fn fill_fit_mode() {
+        // fit=fill scales to cover the box without cropping.
+        // Source 64×32, target 20×40: scale = max(20/64, 40/32) = max(0.3125, 1.25) = 1.25
+        // Output: 80×40 (wider than requested, no crop).
+        let bytes = test_jpeg(64, 32);
+        let params = TransformParams {
+            wid: Some(20),
+            hei: Some(40),
+            fit: Some("fill".to_string()),
+            ..Default::default()
+        };
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
+        assert_eq!(mime, "image/jpeg");
+        let (w, h) = image_dims(&out);
+        assert_eq!(h, 40, "fill fit: height must equal requested hei");
+        assert!(w >= 20, "fill fit: width must be at least the requested wid");
+    }
+
+    #[tokio::test]
+    async fn stretch_fit_mode() {
+        // fit=stretch must produce exactly the requested dimensions regardless of aspect ratio.
+        let bytes = test_jpeg(64, 32);
+        let params = TransformParams {
+            wid: Some(20),
+            hei: Some(40),
+            fit: Some("stretch".to_string()),
+            ..Default::default()
+        };
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
+        assert_eq!(mime, "image/jpeg");
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 20, "stretch fit: width must equal requested wid");
+        assert_eq!(h, 40, "stretch fit: height must equal requested hei");
     }
 
     #[tokio::test]
