@@ -26,6 +26,8 @@ future contributors understand the reasoning behind the current design.
 | [0016](0016-jsonwebtoken-oidc-validation.md) | `jsonwebtoken` for OIDC token validation | Accepted |
 | [0017](0017-prometheus-metrics-crate.md) | `prometheus` crate for metrics | Accepted |
 | [0018](0018-http-206-custom-range-parsing.md) | Custom `Range` header parsing for HTTP 206 video delivery | Accepted |
+| [0019](0019-s3-circuit-breaker.md) | Hand-rolled circuit breaker for S3 storage backend | Accepted |
+| [0020](0020-nested-config-groups.md) | Nested configuration groups in `AppConfig` | Accepted |
 
 ## Format
 

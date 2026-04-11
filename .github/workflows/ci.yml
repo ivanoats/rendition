@@ -64,3 +64,41 @@ jobs:
 
       - name: Test
         run: cargo test --verbose -- --test-threads=1
+
+  s3-integration-tests:
+    name: S3 Integration Tests (LocalStack)
+    runs-on: ubuntu-latest
+    # Uses Docker (available by default on ubuntu-latest) to spawn
+    # LocalStack in-process via testcontainers-modules. The #[ignore]
+    # attribute on each test keeps them out of the main build-and-test
+    # job; this dedicated job runs them with `-- --ignored`.
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+
+      - name: Install system dependencies (libvips)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvips-dev \
+            libheif-dev \
+            libaom-dev \
+            pkg-config
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry & build artefacts
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7  # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run S3 integration tests against LocalStack
+        run: cargo test --test s3_integration -- --ignored --test-threads=1

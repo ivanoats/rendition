@@ -84,13 +84,13 @@ fn loads_with_full_s3_config() {
         || {
             let cfg = AppConfig::load().expect("S3 config should load");
             assert_eq!(cfg.storage_backend, StorageBackendKind::S3);
-            assert_eq!(cfg.s3_bucket.as_deref(), Some("my-assets"));
-            assert_eq!(cfg.s3_region.as_deref(), Some("us-west-2"));
+            assert_eq!(cfg.s3.s3_bucket.as_deref(), Some("my-assets"));
+            assert_eq!(cfg.s3.s3_region.as_deref(), Some("us-west-2"));
             assert_eq!(
-                cfg.s3_endpoint.as_deref(),
+                cfg.s3.s3_endpoint.as_deref(),
                 Some("https://minio.example.com")
             );
-            assert_eq!(cfg.s3_prefix, "prod/");
+            assert_eq!(cfg.s3.s3_prefix, "prod/");
         },
     );
 }
@@ -370,4 +370,137 @@ proptest! {
         );
         prop_assert_eq!(result1.is_ok(), result2.is_ok());
     }
+}
+
+// -------------------------------------------------------------------------
+// Unit 2 — S3Settings group (nested shape, ADR-0020)
+// -------------------------------------------------------------------------
+
+#[test]
+fn s3_settings_defaults() {
+    with_env(&[], || {
+        let cfg = AppConfig::load().expect("defaults should load");
+        assert_eq!(cfg.s3.s3_max_connections, 100);
+        assert_eq!(cfg.s3.s3_timeout_ms, 5000);
+        assert_eq!(cfg.s3.s3_cb_threshold, 5);
+        assert_eq!(cfg.s3.s3_cb_cooldown_secs, 30);
+        assert_eq!(cfg.s3.s3_max_retries, 3);
+        assert_eq!(cfg.s3.s3_retry_base_ms, 50);
+        assert!(!cfg.s3.s3_allow_insecure_endpoint);
+        assert_eq!(cfg.local_timeout_ms, 2000);
+    });
+}
+
+#[test]
+fn s3_settings_all_overridden() {
+    with_env(
+        &[
+            ("RENDITION_STORAGE_BACKEND", "s3"),
+            ("RENDITION_S3_BUCKET", "prod-assets"),
+            ("RENDITION_S3_REGION", "us-east-1"),
+            ("RENDITION_S3_MAX_CONNECTIONS", "200"),
+            ("RENDITION_S3_TIMEOUT_MS", "10000"),
+            ("RENDITION_S3_CB_THRESHOLD", "10"),
+            ("RENDITION_S3_CB_COOLDOWN_SECS", "60"),
+            ("RENDITION_S3_MAX_RETRIES", "5"),
+            ("RENDITION_S3_RETRY_BASE_MS", "100"),
+            ("RENDITION_LOCAL_TIMEOUT_MS", "3000"),
+        ],
+        || {
+            let cfg = AppConfig::load().expect("valid overrides should load");
+            assert_eq!(cfg.s3.s3_max_connections, 200);
+            assert_eq!(cfg.s3.s3_timeout_ms, 10000);
+            assert_eq!(cfg.s3.s3_cb_threshold, 10);
+            assert_eq!(cfg.s3.s3_cb_cooldown_secs, 60);
+            assert_eq!(cfg.s3.s3_max_retries, 5);
+            assert_eq!(cfg.s3.s3_retry_base_ms, 100);
+            assert_eq!(cfg.local_timeout_ms, 3000);
+        },
+    );
+}
+
+#[test]
+fn s3_max_connections_zero_fails() {
+    with_env(&[("RENDITION_S3_MAX_CONNECTIONS", "0")], || {
+        let err = AppConfig::load().unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("S3_MAX_CONNECTIONS"));
+    });
+}
+
+#[test]
+fn s3_timeout_below_100ms_fails() {
+    with_env(&[("RENDITION_S3_TIMEOUT_MS", "50")], || {
+        let err = AppConfig::load().unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("S3_TIMEOUT_MS"));
+    });
+}
+
+#[test]
+fn s3_max_retries_over_10_fails() {
+    with_env(&[("RENDITION_S3_MAX_RETRIES", "15")], || {
+        let err = AppConfig::load().unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("S3_MAX_RETRIES"));
+    });
+}
+
+#[test]
+fn s3_cb_threshold_zero_fails() {
+    with_env(&[("RENDITION_S3_CB_THRESHOLD", "0")], || {
+        let err = AppConfig::load().unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("S3_CB_THRESHOLD"));
+    });
+}
+
+#[test]
+fn local_timeout_below_100ms_fails() {
+    with_env(&[("RENDITION_LOCAL_TIMEOUT_MS", "50")], || {
+        let err = AppConfig::load().unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("LOCAL_TIMEOUT_MS"));
+    });
+}
+
+#[test]
+fn http_s3_endpoint_rejected_by_default() {
+    with_env(
+        &[("RENDITION_S3_ENDPOINT", "http://minio.example.com")],
+        || {
+            let err = AppConfig::load().unwrap_err();
+            assert!(matches!(err, ConfigError::Validation(_)));
+            assert!(err.to_string().contains("https://"));
+        },
+    );
+}
+
+#[test]
+fn http_s3_endpoint_accepted_with_allow_insecure_flag() {
+    with_env(
+        &[
+            ("RENDITION_S3_ENDPOINT", "http://localhost:4566"),
+            ("RENDITION_S3_ALLOW_INSECURE_ENDPOINT", "true"),
+        ],
+        || {
+            let cfg = AppConfig::load().expect("insecure-flag permits http");
+            assert!(cfg.s3.s3_allow_insecure_endpoint);
+            assert_eq!(cfg.s3.s3_endpoint.as_deref(), Some("http://localhost:4566"));
+        },
+    );
+}
+
+#[test]
+fn https_s3_endpoint_always_accepted() {
+    with_env(
+        &[("RENDITION_S3_ENDPOINT", "https://s3.example.com")],
+        || {
+            let cfg = AppConfig::load().expect("https always ok");
+            assert_eq!(
+                cfg.s3.s3_endpoint.as_deref(),
+                Some("https://s3.example.com")
+            );
+        },
+    );
 }

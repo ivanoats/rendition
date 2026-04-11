@@ -1,15 +1,44 @@
 //! Storage adapters.
 //!
-//! Rendition is storage-agnostic.  This module defines the [`StorageBackend`]
-//! trait and ships concrete adapters for:
+//! Rendition is storage-agnostic. This module defines the
+//! [`StorageBackend`] trait and ships concrete adapters:
 //!
-//! * [`LocalStorage`] — local filesystem (development / on-prem)
-//! * [`S3Storage`] — Amazon S3 / S3-compatible (stub, not yet implemented)
+//! * [`LocalStorage`] — local filesystem (development / on-prem). Lives
+//!   in the `local` sub-module.
+//! * [`S3Storage`] — AWS S3 / S3-compatible object store. Lives in the
+//!   `s3` sub-module.
+//!
+//! The [`CircuitBreaker`] fault-tolerance primitive used by `S3Storage`
+//! lives in its own sub-module (`circuit_breaker`) and is reusable by
+//! any future remote backend.
+//!
+//! ## Error taxonomy (ADR-0004 revised, Unit 2)
+//!
+//! Every storage operation returns [`Result<T, StorageError>`]. The
+//! typed variants let HTTP callers distinguish "asset not found" (404)
+//! from "backend unreachable" (503) from "circuit open" (503, fail-fast)
+//! without downcasting.
 
 use std::future::Future;
-use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+pub mod circuit_breaker;
+pub mod local;
+pub mod s3;
+
+pub use local::LocalStorage;
+pub use s3::S3Storage;
+
+// ---------------------------------------------------------------------------
+// Asset DTO
+// ---------------------------------------------------------------------------
 
 /// A raw media asset fetched from a backend.
+///
+/// `size` is the length of `data` in bytes. For range fetches,
+/// `size == data.len() == (range.end - range.start)`, not the full object
+/// size on the backend.
+#[derive(Debug)]
 pub struct Asset {
     /// Raw bytes of the media file.
     pub data: Vec<u8>,
@@ -19,58 +48,200 @@ pub struct Asset {
     pub size: usize,
 }
 
-/// Trait implemented by every storage backend.
-///
-/// Methods return `impl Future + Send` (RPITIT) so that callers in generic
-/// contexts (e.g. axum handlers) can rely on the futures being `Send` without
-/// requiring nightly Return Type Notation (RTN) to express that bound.
-/// Concrete `impl` blocks use `async fn` directly — Rust 1.75+ allows this.
-pub trait StorageBackend: Send + Sync {
-    /// Retrieve an asset by its logical path (e.g. `"products/shoe.jpg"`).
-    ///
-    /// Returns an error when the asset does not exist or cannot be read.
-    fn get(&self, path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send;
+// ---------------------------------------------------------------------------
+// StorageError
+// ---------------------------------------------------------------------------
 
-    /// Return `true` if the asset exists in this backend.
-    fn exists(&self, path: &str) -> impl Future<Output = bool> + Send;
+/// Typed errors returned by every [`StorageBackend`] method.
+///
+/// Variants map to HTTP statuses in the request handler (Unit 4):
+/// `NotFound` → 404, `InvalidPath` → 400,
+/// `CircuitOpen` | `Unavailable` → 503, `Timeout` → 504, `Other` → 500.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    /// Asset is absent from the backend. Maps to HTTP 404.
+    #[error("asset not found")]
+    NotFound,
+
+    /// The logical path is malformed (empty, contains NUL bytes, etc.).
+    /// Maps to HTTP 400.
+    #[error("invalid path: {reason}")]
+    InvalidPath { reason: String },
+
+    /// Circuit breaker is open — the call was rejected without touching
+    /// the backend. Maps to HTTP 503 fail-fast.
+    #[error("circuit breaker open")]
+    CircuitOpen,
+
+    /// I/O deadline exceeded. Maps to HTTP 504.
+    #[error("timeout ({op})")]
+    Timeout {
+        /// The operation that timed out: `get` / `exists` / `get_range`.
+        op: &'static str,
+    },
+
+    /// Transient backend failure (5xx, throttling, connection error).
+    /// Maps to HTTP 503.
+    #[error("backend unavailable: {source}")]
+    Unavailable {
+        /// The underlying cause. Not exposed to HTTP callers — logged
+        /// server-side only via `tracing::error!`.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    /// Any other failure. Maps to HTTP 500.
+    #[error("storage error: {source}")]
+    Other {
+        /// The underlying cause. Not exposed to HTTP callers.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 }
 
-// ---------------------------------------------------------------------------
-// Path-safety helper
-// ---------------------------------------------------------------------------
-
-/// Validates that `path` is a safe relative path and joins it with `root`.
-///
-/// Rejects paths that are absolute or that contain any non-[`Component::Normal`]
-/// segment (e.g. `..`, `.`, or a Windows drive prefix).  This prevents
-/// directory-traversal attacks where a caller supplies a path like
-/// `"../../etc/passwd"` to escape the storage root.
-///
-/// **Limitation**: this check is purely lexical.  Symlinks inside the root
-/// directory that point outside it are not followed or checked here.  If the
-/// underlying storage needs to defend against symlink-based escapes, callers
-/// should additionally canonicalize the resolved path and verify it remains
-/// under `root`.
-///
-/// Returns an error if `path` contains any unsafe component.
-fn safe_join(root: &Path, path: &str) -> anyhow::Result<PathBuf> {
-    let rel = Path::new(path);
-    if rel.is_absolute() {
-        anyhow::bail!("path must be relative: {path}");
-    }
-    for component in rel.components() {
-        match component {
-            Component::Normal(_) => {}
-            _ => anyhow::bail!("invalid path component in: {path}"),
+impl PartialEq for StorageError {
+    /// Cheap equality on the discriminant-only variants. Variants that
+    /// carry inner errors (`Unavailable`, `Other`) are never equal — use
+    /// `matches!` in tests for those.
+    fn eq(&self, other: &Self) -> bool {
+        use StorageError::*;
+        match (self, other) {
+            (NotFound, NotFound) => true,
+            (CircuitOpen, CircuitOpen) => true,
+            (InvalidPath { reason: a }, InvalidPath { reason: b }) => a == b,
+            (Timeout { op: a }, Timeout { op: b }) => a == b,
+            _ => false,
         }
     }
-    Ok(root.join(rel))
 }
 
 // ---------------------------------------------------------------------------
-// Content-type detection
+// StorageMetrics trait (stub — Unit 7 replaces with Prometheus)
 // ---------------------------------------------------------------------------
 
+/// Outcome discriminant recorded on every storage call. One variant per
+/// terminal branch of Flows 1–3 in the functional design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Success,
+    NotFound,
+    Unavailable,
+    Timeout,
+    CircuitOpen,
+    InvalidPath,
+    Other,
+}
+
+/// Metrics port. Unit 2 wires [`NoopMetrics`]; Unit 7 drops in a real
+/// Prometheus implementation without touching `s3.rs` or
+/// `circuit_breaker.rs`.
+pub trait StorageMetrics: Send + Sync + 'static {
+    /// Record the outcome and duration of a storage operation.
+    fn record(&self, op: &str, outcome: Outcome, duration: Duration);
+    /// Update the circuit-breaker open/closed gauge.
+    fn set_circuit_open(&self, open: bool);
+}
+
+/// No-op [`StorageMetrics`] implementation used during Unit 2 before
+/// Unit 7 introduces real Prometheus wiring.
+pub struct NoopMetrics;
+
+impl StorageMetrics for NoopMetrics {
+    fn record(&self, _op: &str, _outcome: Outcome, _duration: Duration) {}
+    fn set_circuit_open(&self, _open: bool) {}
+}
+
+// ---------------------------------------------------------------------------
+// StorageBackend trait
+// ---------------------------------------------------------------------------
+
+/// Trait implemented by every storage backend.
+///
+/// Methods return `impl Future + Send` (RPITIT) so that callers in
+/// generic contexts (e.g. axum handlers) can rely on the futures being
+/// `Send` without requiring Return Type Notation to express that bound.
+/// Concrete `impl` blocks use `async fn` directly — Rust 1.75+ allows
+/// this.
+pub trait StorageBackend: Send + Sync {
+    /// Retrieve the full asset for `path`.
+    fn get(&self, path: &str) -> impl Future<Output = Result<Asset, StorageError>> + Send;
+
+    /// Return whether the asset exists, without downloading its body.
+    fn exists(&self, path: &str) -> impl Future<Output = Result<bool, StorageError>> + Send;
+
+    /// Retrieve a byte range of the asset. Default implementation fetches
+    /// the full asset and slices it; `S3Storage` overrides to pass the
+    /// native `Range` header (ADR-0018).
+    fn get_range(
+        &self,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> impl Future<Output = Result<Asset, StorageError>> + Send {
+        async move {
+            if range.start >= range.end {
+                return Err(StorageError::InvalidPath {
+                    reason: format!(
+                        "empty or inverted range: start={} end={}",
+                        range.start, range.end
+                    ),
+                });
+            }
+            let full = self.get(path).await?;
+            let start = range.start as usize;
+            let end = (range.end as usize).min(full.data.len());
+            let slice = full.data.get(start..end).unwrap_or(&[]).to_vec();
+            let size = slice.len();
+            Ok(Asset {
+                data: slice,
+                content_type: full.content_type,
+                size,
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Compose an S3-style object key from a prefix and a logical path.
+///
+/// Implements R-07 / E5 of the functional design:
+/// 1. Reject empty paths and paths containing NUL bytes.
+/// 2. Strip any leading `/` from the logical path.
+/// 3. Normalise the prefix — append `/` if non-empty and missing it.
+/// 4. Return `prefix + path`.
+///
+/// This is the only place the `logical path → S3 key` mapping is
+/// defined. `LocalStorage` uses its own path-safety helper
+/// (`local::safe_join`) because filesystem semantics differ.
+pub(crate) fn compose_key(prefix: &str, path: &str) -> Result<String, StorageError> {
+    if path.is_empty() {
+        return Err(StorageError::InvalidPath {
+            reason: "empty".into(),
+        });
+    }
+    if path.contains('\0') {
+        return Err(StorageError::InvalidPath {
+            reason: "null byte".into(),
+        });
+    }
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Err(StorageError::InvalidPath {
+            reason: "empty after stripping leading /".into(),
+        });
+    }
+    if prefix.is_empty() {
+        Ok(trimmed.to_string())
+    } else if prefix.ends_with('/') {
+        Ok(format!("{prefix}{trimmed}"))
+    } else {
+        Ok(format!("{prefix}/{trimmed}"))
+    }
+}
+
+/// Infer a MIME type from the extension of a logical path.
 pub(crate) fn content_type_from_ext(path: &str) -> &'static str {
     let lower = path.to_lowercase();
     match lower.rsplit('.').next().unwrap_or("") {
@@ -89,89 +260,12 @@ pub(crate) fn content_type_from_ext(path: &str) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// LocalStorage
-// ---------------------------------------------------------------------------
-
-/// Reads assets from a directory on the local filesystem.
-///
-/// Paths are resolved relative to [`root`](LocalStorage::root).
-/// Configurable via the `RENDITION_ASSETS_PATH` environment variable.
-#[derive(Clone)]
-pub struct LocalStorage {
-    root: PathBuf,
-}
-
-impl LocalStorage {
-    /// Create a new adapter rooted at `root`.
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-}
-
-impl StorageBackend for LocalStorage {
-    async fn get(&self, path: &str) -> anyhow::Result<Asset> {
-        let full_path = safe_join(&self.root, path)?;
-        let content_type = content_type_from_ext(path).to_string();
-        let data = tokio::fs::read(&full_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
-        let size = data.len();
-        Ok(Asset {
-            data,
-            content_type,
-            size,
-        })
-    }
-
-    async fn exists(&self, path: &str) -> bool {
-        let Ok(full_path) = safe_join(&self.root, path) else {
-            return false;
-        };
-        tokio::fs::metadata(full_path).await.is_ok()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// S3Storage (stub)
-// ---------------------------------------------------------------------------
-
-/// Stub for S3-compatible object storage (AWS S3, MinIO, Cloudflare R2).
-///
-/// Not yet implemented — present to demonstrate the pluggable backend pattern.
-#[allow(dead_code)]
-pub struct S3Storage {
-    pub bucket: String,
-    pub region: String,
-}
-
-impl S3Storage {
-    pub fn new(bucket: impl Into<String>, region: impl Into<String>) -> Self {
-        Self {
-            bucket: bucket.into(),
-            region: region.into(),
-        }
-    }
-}
-
-impl StorageBackend for S3Storage {
-    async fn get(&self, _path: &str) -> anyhow::Result<Asset> {
-        todo!("S3Storage::get not yet implemented")
-    }
-
-    async fn exists(&self, _path: &str) -> bool {
-        todo!("S3Storage::exists not yet implemented")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
+// Tests (shared helpers only — backend-specific tests live in their modules)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
 
     // -- content_type_from_ext -----------------------------------------------
 
@@ -231,110 +325,71 @@ mod tests {
         );
     }
 
-    // -- LocalStorage --------------------------------------------------------
+    // -- compose_key ---------------------------------------------------------
 
-    #[tokio::test]
-    async fn exists_returns_true_for_present_file() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("test.jpg"), b"data").unwrap();
-        let storage = LocalStorage::new(dir.path());
-        assert!(storage.exists("test.jpg").await);
-    }
-
-    #[tokio::test]
-    async fn exists_returns_false_for_missing_file() {
-        let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path());
-        assert!(!storage.exists("ghost.jpg").await);
-    }
-
-    #[tokio::test]
-    async fn get_returns_correct_bytes_and_content_type() {
-        let dir = TempDir::new().unwrap();
-        let payload = b"fake jpeg payload";
-        fs::write(dir.path().join("photo.jpg"), payload).unwrap();
-        let storage = LocalStorage::new(dir.path());
-
-        let asset = storage.get("photo.jpg").await.unwrap();
-        assert_eq!(asset.data, payload);
-        assert_eq!(asset.content_type, "image/jpeg");
-        assert_eq!(asset.size, payload.len());
-    }
-
-    #[tokio::test]
-    async fn get_returns_correct_content_type_for_png() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("banner.png"), b"png data").unwrap();
-        let storage = LocalStorage::new(dir.path());
-
-        let asset = storage.get("banner.png").await.unwrap();
-        assert_eq!(asset.content_type, "image/png");
-    }
-
-    #[tokio::test]
-    async fn get_returns_error_for_missing_file() {
-        let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path());
-        assert!(storage.get("ghost.jpg").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn get_size_matches_file_length() {
-        let dir = TempDir::new().unwrap();
-        let data = vec![0u8; 1024];
-        fs::write(dir.path().join("big.jpg"), &data).unwrap();
-        let storage = LocalStorage::new(dir.path());
-
-        let asset = storage.get("big.jpg").await.unwrap();
-        assert_eq!(asset.size, 1024);
-        assert_eq!(asset.data.len(), 1024);
-    }
-
-    // -- Directory traversal prevention -------------------------------------
-
-    #[tokio::test]
-    async fn get_rejects_dotdot_path() {
-        let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path());
-        assert!(storage.get("../etc/passwd").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn get_rejects_absolute_path() {
-        let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path());
-        assert!(storage.get("/etc/passwd").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn exists_returns_false_for_dotdot_path() {
-        let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path());
-        assert!(!storage.exists("../secret.txt").await);
-    }
-
-    #[tokio::test]
-    async fn exists_returns_false_for_absolute_path() {
-        let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path());
-        assert!(!storage.exists("/etc/passwd").await);
+    #[test]
+    fn compose_key_empty_prefix() {
+        assert_eq!(
+            compose_key("", "products/shoe.jpg").unwrap(),
+            "products/shoe.jpg"
+        );
     }
 
     #[test]
-    fn safe_join_accepts_normal_path() {
-        let root = std::path::Path::new("/tmp/root");
-        assert!(safe_join(root, "products/shoe.jpg").is_ok());
+    fn compose_key_prefix_without_trailing_slash() {
+        assert_eq!(
+            compose_key("assets", "products/shoe.jpg").unwrap(),
+            "assets/products/shoe.jpg"
+        );
     }
 
     #[test]
-    fn safe_join_rejects_dotdot() {
-        let root = std::path::Path::new("/tmp/root");
-        assert!(safe_join(root, "../etc/passwd").is_err());
+    fn compose_key_prefix_with_trailing_slash() {
+        assert_eq!(
+            compose_key("assets/", "products/shoe.jpg").unwrap(),
+            "assets/products/shoe.jpg"
+        );
     }
 
     #[test]
-    fn safe_join_rejects_absolute() {
-        let root = std::path::Path::new("/tmp/root");
-        assert!(safe_join(root, "/etc/passwd").is_err());
+    fn compose_key_strips_leading_slash_from_path() {
+        assert_eq!(
+            compose_key("assets/", "/products/shoe.jpg").unwrap(),
+            "assets/products/shoe.jpg"
+        );
+    }
+
+    #[test]
+    fn compose_key_rejects_empty_path() {
+        let err = compose_key("assets/", "").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn compose_key_rejects_null_byte() {
+        let err = compose_key("", "foo\0bar.jpg").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn compose_key_rejects_only_slashes() {
+        let err = compose_key("", "/").unwrap_err();
+        assert!(matches!(err, StorageError::InvalidPath { .. }));
+    }
+
+    // -- StorageError equality -----------------------------------------------
+
+    #[test]
+    fn storage_error_partial_eq_simple_variants() {
+        assert_eq!(StorageError::NotFound, StorageError::NotFound);
+        assert_eq!(StorageError::CircuitOpen, StorageError::CircuitOpen);
+        assert_eq!(
+            StorageError::Timeout { op: "get" },
+            StorageError::Timeout { op: "get" }
+        );
+        assert_ne!(
+            StorageError::Timeout { op: "get" },
+            StorageError::Timeout { op: "exists" }
+        );
     }
 }

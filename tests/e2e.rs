@@ -27,7 +27,7 @@ fn make_fixture_jpeg(w: i32, h: i32) -> Vec<u8> {
     ops::jpegsave_buffer(&img).expect("failed to encode fixture JPEG")
 }
 
-fn setup() -> (TempDir, TestServer) {
+async fn setup() -> (TempDir, TestServer) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let jpeg = make_fixture_jpeg(64, 64);
     fs::write(dir.path().join("sample.jpg"), &jpeg).expect("failed to write fixture");
@@ -36,7 +36,9 @@ fn setup() -> (TempDir, TestServer) {
         assets_path: dir.path().to_path_buf(),
         ..rendition::config::AppConfig::default()
     };
-    let app = rendition::build_app(&config);
+    let app = rendition::build_app(&config)
+        .await
+        .expect("LocalStorage backend cannot fail to build");
     let server = TestServer::new(app).expect("failed to build test server");
     (dir, server)
 }
@@ -47,7 +49,7 @@ fn setup() -> (TempDir, TestServer) {
 
 #[tokio::test]
 async fn health_returns_ok() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server.get("/health").await;
     assert_eq!(resp.status_code(), StatusCode::OK);
     let body: serde_json::Value = resp.json();
@@ -61,7 +63,7 @@ async fn health_returns_ok() {
 
 #[tokio::test]
 async fn cdn_serves_existing_jpeg() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server.get("/cdn/sample.jpg").await;
     assert_eq!(resp.status_code(), StatusCode::OK);
     assert_eq!(
@@ -75,7 +77,7 @@ async fn cdn_serves_existing_jpeg() {
 
 #[tokio::test]
 async fn cdn_returns_404_for_missing_asset() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server.get("/cdn/does-not-exist.jpg").await;
     assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
 }
@@ -86,7 +88,7 @@ async fn cdn_returns_404_for_missing_asset() {
 
 #[tokio::test]
 async fn cdn_converts_to_webp() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("fmt", "webp")
@@ -106,7 +108,7 @@ async fn cdn_converts_to_avif() {
         eprintln!("skipping cdn_converts_to_avif: libvips on this host has no AVIF saver");
         return;
     }
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("fmt", "avif")
@@ -122,7 +124,7 @@ async fn cdn_converts_to_avif() {
 
 #[tokio::test]
 async fn cdn_converts_to_png() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("fmt", "png")
@@ -142,7 +144,7 @@ async fn cdn_converts_to_png() {
 
 #[tokio::test]
 async fn cdn_resizes_by_width() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("wid", "32")
@@ -153,7 +155,7 @@ async fn cdn_resizes_by_width() {
 
 #[tokio::test]
 async fn cdn_resizes_with_crop_fit() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("wid", "20")
@@ -169,7 +171,7 @@ async fn cdn_resizes_with_crop_fit() {
 
 #[tokio::test]
 async fn cdn_accepts_quality_param() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("fmt", "webp")
@@ -184,7 +186,7 @@ async fn cdn_accepts_quality_param() {
 
 #[tokio::test]
 async fn cdn_rotates_90_degrees() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("rotate", "90")
@@ -194,7 +196,7 @@ async fn cdn_rotates_90_degrees() {
 
 #[tokio::test]
 async fn cdn_flips_horizontally() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("flip", "h")
@@ -208,7 +210,7 @@ async fn cdn_flips_horizontally() {
 
 #[tokio::test]
 async fn cdn_returns_500_for_invalid_crop() {
-    let (_dir, server) = setup();
+    let (_dir, server) = setup().await;
     let resp = server
         .get("/cdn/sample.jpg")
         .add_query_param("crop", "bad,data")

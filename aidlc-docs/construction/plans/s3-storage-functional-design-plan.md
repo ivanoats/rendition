@@ -68,9 +68,9 @@ A. ⭐ Introduce a typed `StorageError` enum in `src/storage/mod.rs` with varian
 B. Keep `anyhow::Result<Asset>` and classify with `downcast_ref` at call sites using sentinel error types.
 C. Keep `anyhow::Result<Asset>` for now, introduce `StorageError` in a later unit.
 
-[Answer]:
+[Answer]: A
 
-### Q2 — Circuit breaker scope
+A### Q2 — Circuit breaker scope
 
 Circuit breaker state is per-instance. Should the breaker be:
 
@@ -78,7 +78,7 @@ A. ⭐ Global to the `S3Storage` — one breaker for all keys (simplest, fault-i
 B. Per-operation — separate breakers for `get` / `exists` / `get_range`.
 C. Per-prefix — hash the key prefix into a breaker pool (most granular, most complex).
 
-[Answer]:
+[Answer]: A
 
 ### Q3 — Retry policy for transient S3 errors
 
@@ -88,7 +88,7 @@ A. ⭐ 3 retries max, base delay 50 ms, cap 500 ms, full jitter — retry only o
 B. Configurable (`RENDITION_S3_MAX_RETRIES`, `RENDITION_S3_RETRY_BASE_MS`) with the same defaults.
 C. Delegate entirely to `aws-sdk-s3`'s built-in retry config (no custom retry loop).
 
-[Answer]:
+[Answer]: B
 
 ### Q4 — Circuit breaker half-open behavior
 
@@ -98,7 +98,7 @@ A. ⭐ Classic half-open: let one probe request through. If it succeeds → `Clo
 B. Count-based: let `N` probes through in parallel; if majority succeed → `Closed`.
 C. Time-window recovery: after cooldown, immediately return to `Closed` and retest fresh failures.
 
-[Answer]:
+[Answer]: A
 
 ### Q5 — `get_range` in trait vs `S3Storage` only
 
@@ -108,7 +108,7 @@ A. ⭐ Add `get_range` to the trait with the default (full-fetch-and-slice) impl
 B. Add `get_range` to the trait and require every backend to implement it explicitly (no default).
 C. Keep `get_range` only on `S3Storage` — Unit 4 (range handler) only calls it when backend is S3.
 
-[Answer]:
+[Answer]: A
 
 ### Q6 — Key composition rules
 
@@ -118,7 +118,7 @@ A. ⭐ `s3_prefix` is concatenated verbatim (user is responsible for trailing sl
 B. Always normalise: strip leading `/` from `logical_path`, ensure `s3_prefix` ends with `/` if non-empty.
 C. Reject any `logical_path` containing `..` or starting with `/` at the `S3Storage::get` entry point (defence in depth even though S3 has no filesystem semantics).
 
-[Answer]:
+[Answer]: B
 
 ### Q7 — Content-Type source
 
@@ -128,7 +128,7 @@ A. ⭐ Prefer the S3-returned `Content-Type` header; fall back to `content_type_
 B. Always use `content_type_from_ext` (ignore S3 header) — guarantees identical behaviour across backends.
 C. Always trust S3's `Content-Type` as-is, even if `application/octet-stream`.
 
-[Answer]:
+[Answer]: A
 
 ### Q8 — `exists` semantics on `HeadObject` errors
 
@@ -138,7 +138,7 @@ A. ⭐ `exists` returns `bool` — `true` on 200, `false` on 404/403, **panics o
 B. Change trait signature: `exists(&self, path: &str) -> Result<bool, StorageError>` — propagate errors. This is a breaking change to `LocalStorage` too.
 C. Keep `-> bool`, log-and-return-false on 5xx (loses the 5xx signal — bad for health checks).
 
-[Answer]:
+[Answer]: B
 
 ### Q9 — New config fields to add
 
@@ -155,7 +155,7 @@ A. ⭐ Add all of the above in Unit 2 (extends the Unit 1 `AppConfig` struct). T
 B. Add only S3-specific fields. Defer `RENDITION_LOCAL_TIMEOUT_MS` to a later unit.
 C. Add nothing to `AppConfig`; hardcode defaults in `S3Storage::new` (easier to rip out later).
 
-[Answer]:
+[Answer]: A
 
 ### Q10 — Integration test scope for this unit
 
@@ -165,7 +165,7 @@ A. ⭐ Write LocalStack integration tests (feature-gated `#[cfg(feature = "local
 B. Run LocalStack tests in the main CI job (Docker is available on GitHub Actions ubuntu-latest runners). Accept the extra CI time.
 C. Skip LocalStack tests entirely in Unit 2; rely on unit tests with a mocked `S3Client` trait. Add integration tests in a later unit.
 
-[Answer]:
+[Answer]: A
 
 ### Q11 — MinIO / Cloudflare R2 compatibility
 
@@ -175,7 +175,7 @@ A. ⭐ Test only against LocalStack in Unit 2. Document that MinIO / R2 are supp
 B. Run the same integration test matrix against LocalStack *and* MinIO.
 C. Defer this to a separate "compatibility" test suite in a later unit.
 
-[Answer]:
+[Answer]: A
 
 ---
 

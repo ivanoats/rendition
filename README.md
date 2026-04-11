@@ -68,7 +68,9 @@ That is a real Rendition URL. If it looks like a Scene7 URL, that is the point.
 ### Operations
 
 - Pluggable storage backends: Amazon S3 (with circuit breaker) or local
-  filesystem for development
+  filesystem for development. S3-compatible stores (MinIO, Cloudflare R2,
+  Wasabi, Backblaze B2, DigitalOcean Spaces) work via
+  `RENDITION_S3_ENDPOINT` — no code changes needed
 - In-process LRU transform cache (`moka`) — configurable capacity and TTL;
   SHA-256 cache keys
 - Embargoed assets: hold back campaign images until a launch date; returns
@@ -256,8 +258,16 @@ with a clear error if required variables are missing.
 | `RENDITION_ASSETS_PATH` | `./assets` | Root path for local storage |
 | `RENDITION_S3_BUCKET` | — | S3 bucket name (required when backend is `s3`) |
 | `RENDITION_S3_REGION` | — | AWS region |
-| `RENDITION_S3_ENDPOINT` | — | Custom endpoint for S3-compatible stores (MinIO, R2) |
+| `RENDITION_S3_ENDPOINT` | — | Custom endpoint for S3-compatible stores (MinIO, R2) — must be `https://` unless the insecure flag is set |
 | `RENDITION_S3_PREFIX` | `""` | Key prefix within the bucket |
+| `RENDITION_S3_MAX_CONNECTIONS` | `100` | HTTP connection pool size to S3 |
+| `RENDITION_S3_TIMEOUT_MS` | `5000` | Per-attempt S3 call timeout |
+| `RENDITION_S3_MAX_RETRIES` | `3` | Max retry attempts for transient S3 failures |
+| `RENDITION_S3_RETRY_BASE_MS` | `50` | Base delay for full-jitter retry backoff |
+| `RENDITION_S3_CB_THRESHOLD` | `5` | Consecutive failures before the circuit breaker opens |
+| `RENDITION_S3_CB_COOLDOWN_SECS` | `30` | Circuit breaker cooldown before a half-open probe |
+| `RENDITION_S3_ALLOW_INSECURE_ENDPOINT` | `false` | Permit `http://` S3 endpoints — LocalStack tests only, **never set in production** |
+| `RENDITION_LOCAL_TIMEOUT_MS` | `2000` | Local filesystem read timeout |
 | `RENDITION_CACHE_MAX_ENTRIES` | `1000` | Max transform cache entries (LRU eviction) |
 | `RENDITION_CACHE_TTL_SECONDS` | `3600` | Cache entry TTL |
 | `RENDITION_MAX_PAYLOAD_BYTES` | `52428800` | Max request/asset size (50 MB) |

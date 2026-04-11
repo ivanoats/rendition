@@ -28,7 +28,7 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
-    storage::StorageBackend,
+    storage::{StorageBackend, StorageError},
     transform::{self, TransformParams},
 };
 
@@ -62,20 +62,21 @@ async fn serve_asset<S>(
 where
     S: StorageBackend,
 {
-    if !state.storage.exists(&asset_path).await {
-        return (
-            StatusCode::NOT_FOUND,
-            format!("asset not found: {asset_path}"),
-        )
-            .into_response();
+    match state.storage.exists(&asset_path).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                format!("asset not found: {asset_path}"),
+            )
+                .into_response();
+        }
+        Err(err) => return storage_error_response(&asset_path, err),
     }
 
     let asset = match state.storage.get(&asset_path).await {
         Ok(asset) => asset,
-        Err(err) => {
-            tracing::error!("storage error fetching {asset_path}: {err:#}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "storage error").into_response();
-        }
+        Err(err) => return storage_error_response(&asset_path, err),
     };
 
     match transform::apply(asset.data, params, &asset.content_type).await {
@@ -98,6 +99,38 @@ where
     }
 }
 
+/// Map a [`StorageError`] to an HTTP response.
+///
+/// Full detail is logged server-side via `tracing::error!`; the HTTP
+/// response carries only a generic status text so AWS request IDs,
+/// bucket names, and internal error chains stay inside the server
+/// (SECURITY-09 hardening). Unit 4 will refine the mapping when it
+/// owns the request handler; this implementation is the minimum needed
+/// to keep the existing project compiling after the `StorageBackend`
+/// trait return-type change.
+fn storage_error_response(asset_path: &str, err: StorageError) -> Response {
+    tracing::error!("storage error fetching {asset_path}: {err:#}");
+    match err {
+        StorageError::NotFound => (
+            StatusCode::NOT_FOUND,
+            format!("asset not found: {asset_path}"),
+        )
+            .into_response(),
+        StorageError::InvalidPath { .. } => {
+            (StatusCode::BAD_REQUEST, "invalid asset path").into_response()
+        }
+        StorageError::CircuitOpen | StorageError::Unavailable { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, "storage unavailable").into_response()
+        }
+        StorageError::Timeout { .. } => {
+            (StatusCode::GATEWAY_TIMEOUT, "storage timeout").into_response()
+        }
+        StorageError::Other { .. } => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage error").into_response()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -110,7 +143,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use crate::storage::{Asset, StorageBackend};
+    use crate::storage::{Asset, StorageBackend, StorageError};
 
     // -- MockStorage ---------------------------------------------------------
 
@@ -130,7 +163,7 @@ mod tests {
     }
 
     impl StorageBackend for MockStorage {
-        async fn get(&self, path: &str) -> anyhow::Result<Asset> {
+        async fn get(&self, path: &str) -> Result<Asset, StorageError> {
             self.0
                 .get(path)
                 .map(|data| Asset {
@@ -138,11 +171,11 @@ mod tests {
                     content_type: crate::storage::content_type_from_ext(path).to_string(),
                     data: data.clone(),
                 })
-                .ok_or_else(|| anyhow::anyhow!("not found: {path}"))
+                .ok_or(StorageError::NotFound)
         }
 
-        async fn exists(&self, path: &str) -> bool {
-            self.0.contains_key(path)
+        async fn exists(&self, path: &str) -> Result<bool, StorageError> {
+            Ok(self.0.contains_key(path))
         }
     }
 

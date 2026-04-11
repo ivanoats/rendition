@@ -32,7 +32,13 @@ async fn main() -> ExitCode {
     // Custom Debug impl on AppConfig redacts sensitive fields.
     tracing::info!("Loaded config: {config:?}");
 
-    let app = rendition::build_app(&config);
+    let app = match rendition::build_app(&config).await {
+        Ok(app) => app,
+        Err(err) => {
+            tracing::error!("failed to build application: {err}");
+            return ExitCode::from(1);
+        }
+    };
 
     let bind_addr = config.bind_addr;
     tracing::info!("Rendition CDN listening on {bind_addr}");

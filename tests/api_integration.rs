@@ -8,7 +8,7 @@ use axum_test::TestServer;
 use rendition::config::AppConfig;
 use std::path::PathBuf;
 
-fn make_server() -> TestServer {
+async fn make_server() -> TestServer {
     // CARGO_MANIFEST_DIR points to the crate root, so `assets/` is resolvable
     // regardless of the working directory when `cargo test` is run.
     let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
@@ -16,7 +16,9 @@ fn make_server() -> TestServer {
         assets_path: PathBuf::from(assets),
         ..AppConfig::default()
     };
-    let app = rendition::build_app(&config);
+    let app = rendition::build_app(&config)
+        .await
+        .expect("LocalStorage backend cannot fail to build");
     TestServer::new(app).unwrap()
 }
 
@@ -33,7 +35,7 @@ fn png_dims(bytes: &[u8]) -> (u32, u32) {
 
 #[tokio::test]
 async fn health_returns_200() {
-    let server = make_server();
+    let server = make_server().await;
     server.get("/health").await.assert_status_ok();
 }
 
@@ -43,7 +45,7 @@ async fn health_returns_200() {
 
 #[tokio::test]
 async fn cdn_sample_png_returns_200_with_png_content_type() {
-    let server = make_server();
+    let server = make_server().await;
     let resp = server.get("/cdn/sample.png").await;
     resp.assert_status_ok();
     let ct = resp
@@ -57,7 +59,7 @@ async fn cdn_sample_png_returns_200_with_png_content_type() {
 
 #[tokio::test]
 async fn cdn_nonexistent_returns_404() {
-    let server = make_server();
+    let server = make_server().await;
     server
         .get("/cdn/nonexistent.jpg")
         .await
@@ -66,7 +68,7 @@ async fn cdn_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn cdn_fmt_webp_returns_200_with_webp_content_type() {
-    let server = make_server();
+    let server = make_server().await;
     let resp = server
         .get("/cdn/sample.png")
         .add_query_params([("fmt", "webp")])
@@ -83,7 +85,7 @@ async fn cdn_fmt_webp_returns_200_with_webp_content_type() {
 
 #[tokio::test]
 async fn cdn_resize_width_returns_correct_dimensions() {
-    let server = make_server();
+    let server = make_server().await;
 
     // Capture the original dimensions.
     let orig_resp = server.get("/cdn/sample.png").await;
@@ -106,7 +108,7 @@ async fn cdn_resize_width_returns_correct_dimensions() {
 
 #[tokio::test]
 async fn cdn_resize_crop_returns_exact_dimensions() {
-    let server = make_server();
+    let server = make_server().await;
     let resp = server
         .get("/cdn/sample.png")
         .add_query_params([("wid", "30"), ("hei", "20"), ("fit", "crop")])
@@ -119,7 +121,7 @@ async fn cdn_resize_crop_returns_exact_dimensions() {
 
 #[tokio::test]
 async fn cdn_rotate_90_swaps_dimensions() {
-    let server = make_server();
+    let server = make_server().await;
 
     let orig_resp = server.get("/cdn/sample.png").await;
     orig_resp.assert_status_ok();

@@ -48,18 +48,21 @@ pub struct AppConfig {
     #[serde(default = "default_assets_path")]
     pub assets_path: PathBuf,
 
-    /// S3 bucket name. Required when `storage_backend == S3`.
-    pub s3_bucket: Option<String>,
+    /// S3 backend configuration group. All `RENDITION_S3_*` environment
+    /// variables deserialise into this nested struct (see ADR-0020).
+    ///
+    /// `#[serde(skip)]` here because `envy`'s `#[serde(flatten)]` support
+    /// does not coerce numeric env-var strings into numeric struct fields
+    /// through a flattened child — numeric fields in a flattened struct are
+    /// handed to serde as already-deserialised strings. The two-pass load
+    /// in [`AppConfig::load`] reads the `S3Settings` fields via a second
+    /// `envy::prefixed("RENDITION_").from_env::<S3Settings>()` call.
+    #[serde(skip)]
+    pub s3: S3Settings,
 
-    /// AWS region for the S3 bucket. Required when `storage_backend == S3`.
-    pub s3_region: Option<String>,
-
-    /// Custom endpoint URL for S3-compatible stores (MinIO, R2). Optional.
-    pub s3_endpoint: Option<String>,
-
-    /// Key prefix within the bucket. Default: empty string.
-    #[serde(default)]
-    pub s3_prefix: String,
+    /// Local filesystem read timeout in milliseconds. Default: `2000`.
+    #[serde(default = "default_local_timeout_ms")]
+    pub local_timeout_ms: u64,
 
     /// Maximum number of entries in the in-process transform cache.
     #[serde(default = "default_cache_max_entries")]
@@ -124,6 +127,131 @@ pub enum StorageBackendKind {
     S3,
 }
 
+/// S3 backend configuration group (ADR-0020).
+///
+/// All fields deserialise from `RENDITION_S3_*` environment variables via
+/// `#[serde(flatten)]` on the enclosing [`AppConfig`]. Names in this struct
+/// retain the `s3_` prefix so envy's deserialisation matches the env var
+/// contract unchanged.
+#[derive(Clone, Deserialize)]
+pub struct S3Settings {
+    /// Bucket name. Required when `storage_backend == S3`.
+    pub s3_bucket: Option<String>,
+
+    /// AWS region for the bucket. Required when `storage_backend == S3`.
+    pub s3_region: Option<String>,
+
+    /// Custom endpoint URL for S3-compatible stores (MinIO, R2, LocalStack).
+    /// When unset, the SDK resolves the standard AWS regional endpoint from
+    /// `s3_region`.
+    pub s3_endpoint: Option<String>,
+
+    /// Key prefix within the bucket. Default: empty string.
+    #[serde(default)]
+    pub s3_prefix: String,
+
+    /// Maximum concurrent HTTP connections to S3. Default: `100`.
+    #[serde(default = "default_s3_max_connections")]
+    pub s3_max_connections: u32,
+
+    /// Per-attempt S3 call timeout in milliseconds. Default: `5000`.
+    #[serde(default = "default_s3_timeout_ms")]
+    pub s3_timeout_ms: u64,
+
+    /// Consecutive failure threshold at which the circuit breaker opens.
+    /// Default: `5`.
+    #[serde(default = "default_s3_cb_threshold")]
+    pub s3_cb_threshold: u32,
+
+    /// Circuit breaker cooldown in seconds before a half-open probe.
+    /// Default: `30`.
+    #[serde(default = "default_s3_cb_cooldown_secs")]
+    pub s3_cb_cooldown_secs: u64,
+
+    /// Maximum retry attempts per S3 call (in addition to the initial try).
+    /// Default: `3`.
+    #[serde(default = "default_s3_max_retries")]
+    pub s3_max_retries: u32,
+
+    /// Base delay for the full-jitter retry backoff in milliseconds.
+    /// Default: `50`.
+    #[serde(default = "default_s3_retry_base_ms")]
+    pub s3_retry_base_ms: u64,
+
+    /// Escape hatch permitting `http://` S3 endpoints. Required for
+    /// LocalStack integration tests. MUST remain `false` in production —
+    /// `AppConfig::validate` enforces this.
+    #[serde(default)]
+    pub s3_allow_insecure_endpoint: bool,
+}
+
+impl Default for S3Settings {
+    fn default() -> Self {
+        Self {
+            s3_bucket: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3_prefix: String::new(),
+            s3_max_connections: default_s3_max_connections(),
+            s3_timeout_ms: default_s3_timeout_ms(),
+            s3_cb_threshold: default_s3_cb_threshold(),
+            s3_cb_cooldown_secs: default_s3_cb_cooldown_secs(),
+            s3_max_retries: default_s3_max_retries(),
+            s3_retry_base_ms: default_s3_retry_base_ms(),
+            s3_allow_insecure_endpoint: false,
+        }
+    }
+}
+
+impl S3Settings {
+    /// Validate per-field bounds. Called from [`AppConfig::validate`]
+    /// after cross-field checks.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.s3_max_connections < 1 {
+            return Err(ConfigError::Validation(
+                "RENDITION_S3_MAX_CONNECTIONS must be >= 1".into(),
+            ));
+        }
+        if self.s3_timeout_ms < 100 {
+            return Err(ConfigError::Validation(
+                "RENDITION_S3_TIMEOUT_MS must be >= 100".into(),
+            ));
+        }
+        if self.s3_cb_threshold < 1 {
+            return Err(ConfigError::Validation(
+                "RENDITION_S3_CB_THRESHOLD must be >= 1".into(),
+            ));
+        }
+        if self.s3_cb_cooldown_secs < 1 {
+            return Err(ConfigError::Validation(
+                "RENDITION_S3_CB_COOLDOWN_SECS must be >= 1".into(),
+            ));
+        }
+        if self.s3_max_retries > 10 {
+            return Err(ConfigError::Validation(
+                "RENDITION_S3_MAX_RETRIES must be <= 10 (unbounded retries defeat the circuit breaker)".into(),
+            ));
+        }
+        if self.s3_retry_base_ms < 1 {
+            return Err(ConfigError::Validation(
+                "RENDITION_S3_RETRY_BASE_MS must be >= 1".into(),
+            ));
+        }
+        // Endpoint scheme enforcement (SECURITY-01 in-transit, NFR Req Q8=A).
+        if let Some(endpoint) = self.s3_endpoint.as_deref() {
+            let lower = endpoint.to_ascii_lowercase();
+            if !lower.starts_with("https://") && !self.s3_allow_insecure_endpoint {
+                return Err(ConfigError::Validation(
+                    "RENDITION_S3_ENDPOINT must use https:// \
+                     (set RENDITION_S3_ALLOW_INSECURE_ENDPOINT=true only for LocalStack tests)"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Strategy for extracting the per-request rate-limit key.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -171,10 +299,8 @@ impl Default for AppConfig {
             admin_bind_addr: default_admin_bind_addr(),
             storage_backend: StorageBackendKind::default(),
             assets_path: default_assets_path(),
-            s3_bucket: None,
-            s3_region: None,
-            s3_endpoint: None,
-            s3_prefix: String::new(),
+            s3: S3Settings::default(),
+            local_timeout_ms: default_local_timeout_ms(),
             cache_max_entries: default_cache_max_entries(),
             cache_ttl_seconds: default_cache_ttl_seconds(),
             max_payload_bytes: default_max_payload_bytes(),
@@ -236,6 +362,34 @@ fn default_embargo_cache_ttl_seconds() -> u64 {
     30
 }
 
+fn default_local_timeout_ms() -> u64 {
+    2000
+}
+
+fn default_s3_max_connections() -> u32 {
+    100
+}
+
+fn default_s3_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_s3_cb_threshold() -> u32 {
+    5
+}
+
+fn default_s3_cb_cooldown_secs() -> u64 {
+    30
+}
+
+fn default_s3_max_retries() -> u32 {
+    3
+}
+
+fn default_s3_retry_base_ms() -> u64 {
+    50
+}
+
 // ---- Errors ----------------------------------------------------------------
 
 /// Errors returned from [`AppConfig::load`] and [`AppConfig::validate`].
@@ -269,7 +423,11 @@ impl AppConfig {
     /// Returns [`ConfigError`] if any required field is missing, any field
     /// fails type coercion, or any cross-field invariant is violated.
     pub fn load() -> Result<AppConfig, ConfigError> {
-        let cfg: AppConfig = envy::prefixed("RENDITION_").from_env()?;
+        // First pass: top-level fields (everything except S3).
+        let mut cfg: AppConfig = envy::prefixed("RENDITION_").from_env()?;
+        // Second pass: S3 group. envy ignores env vars that don't match
+        // struct fields, so reading the same namespace twice is safe.
+        cfg.s3 = envy::prefixed("RENDITION_").from_env::<S3Settings>()?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -282,16 +440,26 @@ impl AppConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         // S3 backend requires bucket and region.
         if self.storage_backend == StorageBackendKind::S3 {
-            if self.s3_bucket.as_deref().unwrap_or("").is_empty() {
+            if self.s3.s3_bucket.as_deref().unwrap_or("").is_empty() {
                 return Err(ConfigError::Validation(
                     "RENDITION_S3_BUCKET is required when RENDITION_STORAGE_BACKEND=s3".into(),
                 ));
             }
-            if self.s3_region.as_deref().unwrap_or("").is_empty() {
+            if self.s3.s3_region.as_deref().unwrap_or("").is_empty() {
                 return Err(ConfigError::Validation(
                     "RENDITION_S3_REGION is required when RENDITION_STORAGE_BACKEND=s3".into(),
                 ));
             }
+        }
+
+        // Per-field S3 bounds and endpoint scheme.
+        self.s3.validate()?;
+
+        // Local storage read timeout.
+        if self.local_timeout_ms < 100 {
+            return Err(ConfigError::Validation(
+                "RENDITION_LOCAL_TIMEOUT_MS must be >= 100".into(),
+            ));
         }
 
         // OIDC issuer and audience must come together.
@@ -368,10 +536,8 @@ impl fmt::Debug for AppConfig {
             .field("admin_bind_addr", &self.admin_bind_addr)
             .field("storage_backend", &self.storage_backend)
             .field("assets_path", &self.assets_path)
-            .field("s3_bucket", &self.s3_bucket)
-            .field("s3_region", &self.s3_region)
-            .field("s3_endpoint", &self.s3_endpoint)
-            .field("s3_prefix", &self.s3_prefix)
+            .field("s3", &self.s3)
+            .field("local_timeout_ms", &self.local_timeout_ms)
             .field("cache_max_entries", &self.cache_max_entries)
             .field("cache_ttl_seconds", &self.cache_ttl_seconds)
             .field("max_payload_bytes", &self.max_payload_bytes)
@@ -401,6 +567,27 @@ impl fmt::Debug for OidcConfig {
             .field("oidc_issuer", &self.oidc_issuer)
             .field("oidc_audience", &self.oidc_audience)
             .field("oidc_admin_group", &self.oidc_admin_group)
+            .finish()
+    }
+}
+
+impl fmt::Debug for S3Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Settings")
+            .field("s3_bucket", &self.s3_bucket)
+            .field("s3_region", &self.s3_region)
+            .field("s3_endpoint", &self.s3_endpoint)
+            .field("s3_prefix", &self.s3_prefix)
+            .field("s3_max_connections", &self.s3_max_connections)
+            .field("s3_timeout_ms", &self.s3_timeout_ms)
+            .field("s3_cb_threshold", &self.s3_cb_threshold)
+            .field("s3_cb_cooldown_secs", &self.s3_cb_cooldown_secs)
+            .field("s3_max_retries", &self.s3_max_retries)
+            .field("s3_retry_base_ms", &self.s3_retry_base_ms)
+            .field(
+                "s3_allow_insecure_endpoint",
+                &self.s3_allow_insecure_endpoint,
+            )
             .finish()
     }
 }

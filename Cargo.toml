@@ -8,7 +8,7 @@ repository = "https://github.com/ivanoats/rendition"
 
 [dependencies]
 axum = { version = "0.7", features = ["multipart"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors", "fs"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,9 +20,20 @@ thiserror = "1"
 envy = "0.4"
 url = { version = "2", features = ["serde"] }
 libvips = "1.7.3"
+# Unit 2 — S3 Storage Backend
+aws-config = { version = "1", default-features = false, features = ["rustls", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rustls", "rt-tokio", "behavior-version-latest"] }
+aws-smithy-runtime = { version = "1", features = ["client", "connector-hyper-0-14-x"] }
+aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
+aws-credential-types = "1"
+rand = "0.9"
 
 [dev-dependencies]
 axum-test = "14"
 tempfile = "3"
 proptest = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Unit 2 — LocalStack integration tests
+testcontainers-modules = { version = "0.12", features = ["localstack"] }
+uuid = { version = "1", features = ["v4"] }
