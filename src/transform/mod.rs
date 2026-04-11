@@ -40,6 +40,47 @@ pub struct TransformParams {
     pub flip: Option<String>,
 }
 
+impl TransformParams {
+    /// Stable, canonical byte representation used for cache key derivation.
+    ///
+    /// All fields are serialised in **alphabetical order** using a dedicated
+    /// helper struct, so that two `TransformParams` values built from the same
+    /// logical parameters but in a different URL query-string order produce
+    /// identical bytes.
+    ///
+    /// Uses JSON encoding for human-debuggability; the exact wire format is
+    /// an implementation detail — callers must treat the bytes as opaque.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        /// Private struct with fields declared in alphabetical order.
+        /// `serde_json` serialises struct fields in declaration order, so
+        /// this guarantees a stable JSON key sequence regardless of how the
+        /// outer `TransformParams` was constructed.
+        #[derive(serde::Serialize)]
+        struct CanonicalParams<'a> {
+            crop: &'a Option<String>,
+            fit: &'a Option<String>,
+            flip: &'a Option<String>,
+            fmt: &'a Option<String>,
+            hei: Option<u32>,
+            qlt: Option<u8>,
+            rotate: Option<i32>,
+            wid: Option<u32>,
+        }
+
+        serde_json::to_vec(&CanonicalParams {
+            crop: &self.crop,
+            fit: &self.fit,
+            flip: &self.flip,
+            fmt: &self.fmt,
+            hei: self.hei,
+            qlt: self.qlt,
+            rotate: self.rotate,
+            wid: self.wid,
+        })
+        .expect("CanonicalParams serialization is infallible")
+    }
+}
+
 // ---- libvips initialisation ------------------------------------------------
 
 static VIPS_APP: OnceLock<VipsApp> = OnceLock::new();

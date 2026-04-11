@@ -3,7 +3,7 @@
 ## Project Information
 - **Project Type**: Brownfield
 - **Start Date**: 2026-04-09T00:00:00Z
-- **Current Stage**: CONSTRUCTION - Per-Unit Loop (Unit 2: S3 Storage Backend)
+- **Current Stage**: CONSTRUCTION - Per-Unit Loop (Unit 3: Transform Cache — COMPLETED; Unit 2: S3 Storage Backend — PENDING)
 
 ## Workspace State
 - **Existing Code**: Yes
@@ -46,7 +46,11 @@
   - **Tests**: 19 passing (16 unit/scenario + 3 proptest invariants)
   - **Total tests**: 82 passing across all suites
 - [ ] Unit 2 - S3 Storage Backend - PENDING
-- [ ] Unit 3 - Transform Cache - PENDING
+- [x] Unit 3 - Transform Cache - COMPLETED (2026-04-11T00:00:00Z)
+  - **Code**: src/cache.rs (new), src/metrics.rs (new), src/transform/mod.rs, src/api/mod.rs, src/lib.rs, Cargo.toml
+  - **Tests**: 67 lib tests passing (incl. 3 proptest invariants); 105 total across all suites
+  - **Clippy**: clean (-D warnings)
+  - **Artifacts**: aidlc-docs/construction/transform-cache/
 - [ ] Unit 4 - Transform Pipeline Enhancements - PENDING
 - [ ] Unit 5 - Embargo + Admin API - PENDING
 - [ ] Unit 6 - Middleware - PENDING

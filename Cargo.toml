@@ -20,6 +20,8 @@ thiserror = "1"
 envy = "0.4"
 url = { version = "2", features = ["serde"] }
 libvips = "1.7.3"
+moka = { version = "0.12", features = ["sync"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 axum-test = "14"
