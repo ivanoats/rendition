@@ -134,6 +134,7 @@ fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vi
             let s = match (sx, sy) {
                 (Some(x), Some(y)) => x.max(y),
                 (Some(x), None) | (None, Some(x)) => x,
+                // Both None is unreachable: guarded at the top of this function.
                 (None, None) => return Ok(image),
             };
             (s, s)
@@ -147,6 +148,7 @@ fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vi
             let s = match (sx, sy) {
                 (Some(x), Some(y)) => x.min(y),
                 (Some(x), None) | (None, Some(x)) => x,
+                // Both None is unreachable: guarded at the top of this function.
                 (None, None) => return Ok(image),
             };
             (s, s)
