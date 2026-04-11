@@ -16,9 +16,13 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+thiserror = "1"
+envy = "0.4"
+url = { version = "2", features = ["serde"] }
 libvips = "1.7.3"
 
 [dev-dependencies]
 axum-test = "14"
 tempfile = "3"
+proptest = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }

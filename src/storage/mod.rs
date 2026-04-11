@@ -7,7 +7,7 @@
 //! * [`S3Storage`] — Amazon S3 / S3-compatible (stub, not yet implemented)
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 /// A raw media asset fetched from a backend.
 pub struct Asset {
@@ -20,6 +20,11 @@ pub struct Asset {
 }
 
 /// Trait implemented by every storage backend.
+///
+/// Methods return `impl Future + Send` (RPITIT) so that callers in generic
+/// contexts (e.g. axum handlers) can rely on the futures being `Send` without
+/// requiring nightly Return Type Notation (RTN) to express that bound.
+/// Concrete `impl` blocks use `async fn` directly — Rust 1.75+ allows this.
 pub trait StorageBackend: Send + Sync {
     /// Retrieve an asset by its logical path (e.g. `"products/shoe.jpg"`).
     ///
@@ -31,10 +36,42 @@ pub trait StorageBackend: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Path-safety helper
+// ---------------------------------------------------------------------------
+
+/// Validates that `path` is a safe relative path and joins it with `root`.
+///
+/// Rejects paths that are absolute or that contain any non-[`Component::Normal`]
+/// segment (e.g. `..`, `.`, or a Windows drive prefix).  This prevents
+/// directory-traversal attacks where a caller supplies a path like
+/// `"../../etc/passwd"` to escape the storage root.
+///
+/// **Limitation**: this check is purely lexical.  Symlinks inside the root
+/// directory that point outside it are not followed or checked here.  If the
+/// underlying storage needs to defend against symlink-based escapes, callers
+/// should additionally canonicalize the resolved path and verify it remains
+/// under `root`.
+///
+/// Returns an error if `path` contains any unsafe component.
+fn safe_join(root: &Path, path: &str) -> anyhow::Result<PathBuf> {
+    let rel = Path::new(path);
+    if rel.is_absolute() {
+        anyhow::bail!("path must be relative: {path}");
+    }
+    for component in rel.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => anyhow::bail!("invalid path component in: {path}"),
+        }
+    }
+    Ok(root.join(rel))
+}
+
+// ---------------------------------------------------------------------------
 // Content-type detection
 // ---------------------------------------------------------------------------
 
-fn content_type_from_ext(path: &str) -> &'static str {
+pub(crate) fn content_type_from_ext(path: &str) -> &'static str {
     let lower = path.to_lowercase();
     match lower.rsplit('.').next().unwrap_or("") {
         "jpg" | "jpeg" => "image/jpeg",
@@ -72,25 +109,25 @@ impl LocalStorage {
 }
 
 impl StorageBackend for LocalStorage {
-    fn get(&self, path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send {
-        let full_path = self.root.join(path);
+    async fn get(&self, path: &str) -> anyhow::Result<Asset> {
+        let full_path = safe_join(&self.root, path)?;
         let content_type = content_type_from_ext(path).to_string();
-        async move {
-            let data = tokio::fs::read(&full_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
-            let size = data.len();
-            Ok(Asset {
-                data,
-                content_type,
-                size,
-            })
-        }
+        let data = tokio::fs::read(&full_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", full_path.display(), e))?;
+        let size = data.len();
+        Ok(Asset {
+            data,
+            content_type,
+            size,
+        })
     }
 
-    fn exists(&self, path: &str) -> impl Future<Output = bool> + Send {
-        let full_path = self.root.join(path);
-        async move { tokio::fs::metadata(&full_path).await.is_ok() }
+    async fn exists(&self, path: &str) -> bool {
+        let Ok(full_path) = safe_join(&self.root, path) else {
+            return false;
+        };
+        tokio::fs::metadata(full_path).await.is_ok()
     }
 }
 
@@ -117,12 +154,12 @@ impl S3Storage {
 }
 
 impl StorageBackend for S3Storage {
-    fn get(&self, _path: &str) -> impl Future<Output = anyhow::Result<Asset>> + Send {
-        async { todo!("S3Storage::get not yet implemented") }
+    async fn get(&self, _path: &str) -> anyhow::Result<Asset> {
+        todo!("S3Storage::get not yet implemented")
     }
 
-    fn exists(&self, _path: &str) -> impl Future<Output = bool> + Send {
-        async { todo!("S3Storage::exists not yet implemented") }
+    async fn exists(&self, _path: &str) -> bool {
+        todo!("S3Storage::exists not yet implemented")
     }
 }
 
@@ -133,86 +170,171 @@ impl StorageBackend for S3Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
-    // --- content_type_from_ext ---
+    // -- content_type_from_ext -----------------------------------------------
 
     #[test]
-    fn extension_to_mime_jpeg() {
+    fn content_type_jpeg() {
         assert_eq!(content_type_from_ext("photo.jpg"), "image/jpeg");
+        assert_eq!(content_type_from_ext("photo.JPEG"), "image/jpeg");
         assert_eq!(content_type_from_ext("photo.jpeg"), "image/jpeg");
     }
 
     #[test]
-    fn extension_to_mime_png() {
+    fn content_type_png() {
         assert_eq!(content_type_from_ext("image.png"), "image/png");
     }
 
     #[test]
-    fn extension_to_mime_webp() {
+    fn content_type_webp() {
         assert_eq!(content_type_from_ext("image.webp"), "image/webp");
     }
 
     #[test]
-    fn extension_to_mime_svg() {
+    fn content_type_avif() {
+        assert_eq!(content_type_from_ext("image.avif"), "image/avif");
+    }
+
+    #[test]
+    fn content_type_gif() {
+        assert_eq!(content_type_from_ext("anim.gif"), "image/gif");
+    }
+
+    #[test]
+    fn content_type_svg() {
         assert_eq!(content_type_from_ext("icon.svg"), "image/svg+xml");
     }
 
     #[test]
-    fn extension_to_mime_mp4() {
-        assert_eq!(content_type_from_ext("video.mp4"), "video/mp4");
+    fn content_type_video() {
+        assert_eq!(content_type_from_ext("clip.mp4"), "video/mp4");
+        assert_eq!(content_type_from_ext("clip.webm"), "video/webm");
+        assert_eq!(content_type_from_ext("clip.mov"), "video/quicktime");
     }
 
     #[test]
-    fn extension_to_mime_unknown() {
+    fn content_type_pdf() {
+        assert_eq!(content_type_from_ext("doc.pdf"), "application/pdf");
+    }
+
+    #[test]
+    fn content_type_unknown_falls_back_to_octet_stream() {
         assert_eq!(
             content_type_from_ext("file.xyz"),
             "application/octet-stream"
         );
-        assert_eq!(content_type_from_ext("no-extension"), "application/octet-stream");
+        assert_eq!(
+            content_type_from_ext("noextension"),
+            "application/octet-stream"
+        );
     }
 
-    // --- LocalStorage ---
+    // -- LocalStorage --------------------------------------------------------
 
     #[tokio::test]
-    async fn local_storage_get_existing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let filename = "rendition_test_get_existing.png";
-        let file_path = dir.path().join(filename);
-        let data = b"fake png bytes";
-        tokio::fs::write(&file_path, data).await.unwrap();
-
+    async fn exists_returns_true_for_present_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("test.jpg"), b"data").unwrap();
         let storage = LocalStorage::new(dir.path());
-        let asset = storage.get(filename).await.unwrap();
+        assert!(storage.exists("test.jpg").await);
+    }
 
-        assert_eq!(asset.data, data);
+    #[tokio::test]
+    async fn exists_returns_false_for_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(!storage.exists("ghost.jpg").await);
+    }
+
+    #[tokio::test]
+    async fn get_returns_correct_bytes_and_content_type() {
+        let dir = TempDir::new().unwrap();
+        let payload = b"fake jpeg payload";
+        fs::write(dir.path().join("photo.jpg"), payload).unwrap();
+        let storage = LocalStorage::new(dir.path());
+
+        let asset = storage.get("photo.jpg").await.unwrap();
+        assert_eq!(asset.data, payload);
+        assert_eq!(asset.content_type, "image/jpeg");
+        assert_eq!(asset.size, payload.len());
+    }
+
+    #[tokio::test]
+    async fn get_returns_correct_content_type_for_png() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("banner.png"), b"png data").unwrap();
+        let storage = LocalStorage::new(dir.path());
+
+        let asset = storage.get("banner.png").await.unwrap();
         assert_eq!(asset.content_type, "image/png");
-        assert_eq!(asset.size, data.len());
     }
 
     #[tokio::test]
-    async fn local_storage_get_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn get_returns_error_for_missing_file() {
+        let dir = TempDir::new().unwrap();
         let storage = LocalStorage::new(dir.path());
-        let result = storage.get("rendition_test_does_not_exist_xyz.png").await;
-        assert!(result.is_err());
+        assert!(storage.get("ghost.jpg").await.is_err());
     }
 
     #[tokio::test]
-    async fn local_storage_exists_true() {
-        let dir = tempfile::tempdir().unwrap();
-        let filename = "rendition_test_exists_true.png";
-        let file_path = dir.path().join(filename);
-        tokio::fs::write(&file_path, b"data").await.unwrap();
-
+    async fn get_size_matches_file_length() {
+        let dir = TempDir::new().unwrap();
+        let data = vec![0u8; 1024];
+        fs::write(dir.path().join("big.jpg"), &data).unwrap();
         let storage = LocalStorage::new(dir.path());
-        assert!(storage.exists(filename).await);
+
+        let asset = storage.get("big.jpg").await.unwrap();
+        assert_eq!(asset.size, 1024);
+        assert_eq!(asset.data.len(), 1024);
+    }
+
+    // -- Directory traversal prevention -------------------------------------
+
+    #[tokio::test]
+    async fn get_rejects_dotdot_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(storage.get("../etc/passwd").await.is_err());
     }
 
     #[tokio::test]
-    async fn local_storage_exists_false() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn get_rejects_absolute_path() {
+        let dir = TempDir::new().unwrap();
         let storage = LocalStorage::new(dir.path());
-        assert!(!storage.exists("rendition_test_absent_xyz.png").await);
+        assert!(storage.get("/etc/passwd").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn exists_returns_false_for_dotdot_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(!storage.exists("../secret.txt").await);
+    }
+
+    #[tokio::test]
+    async fn exists_returns_false_for_absolute_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        assert!(!storage.exists("/etc/passwd").await);
+    }
+
+    #[test]
+    fn safe_join_accepts_normal_path() {
+        let root = std::path::Path::new("/tmp/root");
+        assert!(safe_join(root, "products/shoe.jpg").is_ok());
+    }
+
+    #[test]
+    fn safe_join_rejects_dotdot() {
+        let root = std::path::Path::new("/tmp/root");
+        assert!(safe_join(root, "../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn safe_join_rejects_absolute() {
+        let root = std::path::Path::new("/tmp/root");
+        assert!(safe_join(root, "/etc/passwd").is_err());
     }
 }
-

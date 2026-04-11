@@ -5,12 +5,18 @@
 
 use axum::http::StatusCode;
 use axum_test::TestServer;
+use rendition::config::AppConfig;
+use std::path::PathBuf;
 
 fn make_server() -> TestServer {
     // CARGO_MANIFEST_DIR points to the crate root, so `assets/` is resolvable
     // regardless of the working directory when `cargo test` is run.
     let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
-    let app = rendition::build_app(assets);
+    let config = AppConfig {
+        assets_path: PathBuf::from(assets),
+        ..AppConfig::default()
+    };
+    let app = rendition::build_app(&config);
     TestServer::new(app).unwrap()
 }
 
@@ -62,7 +68,7 @@ async fn cdn_fmt_webp_returns_200_with_webp_content_type() {
     let server = make_server();
     let resp = server
         .get("/cdn/sample.png")
-        .add_query_params(&[("fmt", "webp")])
+        .add_query_params([("fmt", "webp")])
         .await;
     resp.assert_status_ok();
     let ct = resp
@@ -87,7 +93,7 @@ async fn cdn_resize_width_returns_correct_dimensions() {
     let target_w: u32 = (orig_w / 2).max(1);
     let resp = server
         .get("/cdn/sample.png")
-        .add_query_params(&[("wid", &target_w.to_string())])
+        .add_query_params([("wid", &target_w.to_string())])
         .await;
     resp.assert_status_ok();
     let (out_w, _out_h) = png_dims(resp.as_bytes());
@@ -99,7 +105,7 @@ async fn cdn_resize_crop_returns_exact_dimensions() {
     let server = make_server();
     let resp = server
         .get("/cdn/sample.png")
-        .add_query_params(&[("wid", "30"), ("hei", "20"), ("fit", "crop")])
+        .add_query_params([("wid", "30"), ("hei", "20"), ("fit", "crop")])
         .await;
     resp.assert_status_ok();
     let (out_w, out_h) = png_dims(resp.as_bytes());
@@ -117,17 +123,11 @@ async fn cdn_rotate_90_swaps_dimensions() {
 
     let rotated_resp = server
         .get("/cdn/sample.png")
-        .add_query_params(&[("rotate", "90")])
+        .add_query_params([("rotate", "90")])
         .await;
     rotated_resp.assert_status_ok();
     let (rot_w, rot_h) = png_dims(rotated_resp.as_bytes());
 
-    assert_eq!(
-        rot_w, orig_h,
-        "rotated width should equal original height"
-    );
-    assert_eq!(
-        rot_h, orig_w,
-        "rotated height should equal original width"
-    );
+    assert_eq!(rot_w, orig_h, "rotated width should equal original height");
+    assert_eq!(rot_h, orig_w, "rotated height should equal original width");
 }

@@ -1,12 +1,15 @@
 //! Rendition — open source enterprise media CDN
 //!
-//! Entry point: starts the Axum HTTP server and registers all routes.
+//! Entry point: initialises logging, loads configuration from `RENDITION_*`
+//! environment variables, and starts the Axum HTTP server.  Application
+//! logic lives in the `rendition` library crate.
 
-use std::net::SocketAddr;
+use rendition::config::AppConfig;
+use std::process::ExitCode;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -15,17 +18,36 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let assets_path =
-        std::env::var("RENDITION_ASSETS_PATH").unwrap_or_else(|_| "./assets".into());
-    tracing::info!("Asset root: {assets_path}");
+    // Fail-fast configuration load. Any error must prevent the process from
+    // binding its listeners — there is no graceful degradation for
+    // misconfiguration (FR-02).
+    let config = match AppConfig::load() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!("configuration error: {err}");
+            return ExitCode::from(1);
+        }
+    };
 
-    let app = rendition::build_app(&assets_path);
+    // Custom Debug impl on AppConfig redacts sensitive fields.
+    tracing::info!("Loaded config: {config:?}");
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    tracing::info!("Rendition listening on {addr}");
+    let app = rendition::build_app(&config);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    let bind_addr = config.bind_addr;
+    tracing::info!("Rendition CDN listening on {bind_addr}");
 
-    Ok(())
+    let listener = match tokio::net::TcpListener::bind(bind_addr).await {
+        Ok(l) => l,
+        Err(err) => {
+            tracing::error!("failed to bind {bind_addr}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!("server terminated with error: {err}");
+        return ExitCode::from(1);
+    }
+
+    ExitCode::SUCCESS
 }

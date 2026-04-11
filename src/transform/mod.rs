@@ -4,16 +4,16 @@
 //! format conversion, quality adjustment.  Built on libvips for fast,
 //! memory-efficient processing of large images.
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
+#[cfg(test)]
+use libvips::ops::BlackOptions;
 use libvips::{
     ops::{
-        self, ForeignHeifCompression, HeifsaveBufferOptions, JpegsaveBufferOptions,
-        ResizeOptions, WebpsaveBufferOptions,
+        self, ForeignHeifCompression, HeifsaveBufferOptions, JpegsaveBufferOptions, ResizeOptions,
     },
     VipsApp, VipsImage,
 };
-#[cfg(test)]
-use libvips::ops::BlackOptions;
+use std::ffi::CString;
 use std::sync::OnceLock;
 
 /// Parameters parsed from a Rendition transform URL.
@@ -45,10 +45,51 @@ pub struct TransformParams {
 static VIPS_APP: OnceLock<VipsApp> = OnceLock::new();
 
 /// Ensure libvips is initialised exactly once for the process lifetime.
-fn ensure_vips() {
-    VIPS_APP.get_or_init(|| {
-        VipsApp::new("rendition", false).expect("Cannot initialize libvips")
-    });
+pub(crate) fn ensure_vips() {
+    VIPS_APP.get_or_init(|| VipsApp::new("rendition", false).expect("Cannot initialize libvips"));
+}
+
+// ---- Format capability detection -------------------------------------------
+//
+// libvips can be built with or without optional savers (HEIF/AVIF, JXL, etc.).
+// Calling a saver that is not registered causes the underlying C function to
+// return NULL, and the `libvips` crate (1.7.3) constructs a `Vec` from that
+// NULL pointer without checking — triggering an unrecoverable, non-unwinding
+// `SIGABRT` via Rust's UB checks.
+//
+// To avoid this we probe support before invoking the saver. The probe uses
+// `vips_foreign_find_save_buffer`, which is a pure capability check: it
+// returns the saver function name (non-null) if a saver exists for the
+// given suffix, or NULL otherwise. It does not invoke the saver itself,
+// so it cannot trigger the `new_byte_array` bug.
+
+/// Returns `true` if libvips on this host can save AVIF images.
+///
+/// The result is cached after the first call.
+pub fn avif_supported() -> bool {
+    static AVIF: OnceLock<bool> = OnceLock::new();
+    *AVIF.get_or_init(|| save_buffer_supported(".avif"))
+}
+
+/// Returns `true` if libvips on this host can save WebP images.
+///
+/// The result is cached after the first call.
+pub fn webp_supported() -> bool {
+    static WEBP: OnceLock<bool> = OnceLock::new();
+    *WEBP.get_or_init(|| save_buffer_supported(".webp"))
+}
+
+fn save_buffer_supported(suffix: &str) -> bool {
+    ensure_vips();
+    let Ok(c_suffix) = CString::new(suffix) else {
+        return false;
+    };
+    // SAFETY: `vips_foreign_find_save_buffer` is a pure capability lookup.
+    // It accepts a null-terminated suffix and returns either a pointer to
+    // a static C string (the saver function name) or NULL. We never
+    // dereference the returned pointer; we only check whether it is null.
+    let ptr = unsafe { libvips::bindings::vips_foreign_find_save_buffer(c_suffix.as_ptr()) };
+    !ptr.is_null()
 }
 
 // ---- Public API ------------------------------------------------------------
@@ -83,8 +124,7 @@ fn apply_blocking(
 ) -> anyhow::Result<(Vec<u8>, &'static str)> {
     ensure_vips();
 
-    let image = VipsImage::new_from_buffer(&source, "")
-        .context("failed to decode source image")?;
+    let image = VipsImage::new_from_buffer(&source, "").context("failed to decode source image")?;
 
     let image = apply_crop(image, &params)?;
     let image = apply_resize(image, &params)?;
@@ -119,59 +159,47 @@ fn apply_resize(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vi
         return Ok(image);
     }
 
-    let orig_w = image.get_width() as f64;
-    let orig_h = image.get_height() as f64;
+    let src_w = image.get_width() as f64;
+    let src_h = image.get_height() as f64;
     let fit = params.fit.as_deref().unwrap_or("constrain");
 
-    // Scale factors: only computed for dimensions that are explicitly provided.
-    let sx = params.wid.map(|w| w as f64 / orig_w);
-    let sy = params.hei.map(|h| h as f64 / orig_h);
-
-    let (hscale, vscale) = match fit {
-        // Fill the box and crop — scale up to the larger factor.
-        // When only one dimension is given, scale uniformly by that factor.
+    match fit {
+        "stretch" | "fill" => {
+            // Scale each axis independently to exactly fill the target box.
+            let target_w = params.wid.map(|v| v as f64).unwrap_or(src_w);
+            let target_h = params.hei.map(|v| v as f64).unwrap_or(src_h);
+            ops::resize_with_opts(
+                &image,
+                target_w / src_w,
+                &ResizeOptions {
+                    vscale: target_h / src_h,
+                    ..Default::default()
+                },
+            )
+            .context("resize (stretch) failed")
+        }
         "crop" => {
-            let s = match (sx, sy) {
-                (Some(x), Some(y)) => x.max(y),
-                (Some(x), None) | (None, Some(x)) => x,
-                (None, None) => return Ok(image),
-            };
-            (s, s)
+            // Scale to fill the target box, then center-crop to exact dimensions.
+            let target_w = params.wid.map(|v| v as f64).unwrap_or(src_w);
+            let target_h = params.hei.map(|v| v as f64).unwrap_or(src_h);
+            let scale = (target_w / src_w).max(target_h / src_h);
+            let scaled = ops::resize(&image, scale).context("resize (crop scale) failed")?;
+            let scaled_w = scaled.get_width();
+            let scaled_h = scaled.get_height();
+            let crop_x = ((scaled_w - target_w as i32) / 2).max(0);
+            let crop_y = ((scaled_h - target_h as i32) / 2).max(0);
+            let crop_w = (target_w as i32).min(scaled_w);
+            let crop_h = (target_h as i32).min(scaled_h);
+            ops::extract_area(&scaled, crop_x, crop_y, crop_w, crop_h)
+                .context("resize (crop extract) failed")
         }
-        // Stretch each axis independently.
-        // When a dimension is absent, do not scale that axis (factor = 1.0).
-        "stretch" | "fill" => (sx.unwrap_or(1.0), sy.unwrap_or(1.0)),
-        // Constrain / fit within the box — scale by the smaller factor.
-        // When only one dimension is given, scale uniformly by that factor.
         _ => {
-            let s = match (sx, sy) {
-                (Some(x), Some(y)) => x.min(y),
-                (Some(x), None) | (None, Some(x)) => x,
-                (None, None) => return Ok(image),
-            };
-            (s, s)
+            // "constrain", "fit", or unrecognised → fit within the box preserving aspect ratio.
+            let target_w = params.wid.map(|v| v as f64).unwrap_or(f64::MAX);
+            let target_h = params.hei.map(|v| v as f64).unwrap_or(f64::MAX);
+            let scale = (target_w / src_w).min(target_h / src_h).min(1.0);
+            ops::resize(&image, scale).context("resize failed")
         }
-    };
-
-    // ops::resize takes hscale and an optional vscale (defaults to hscale).
-    let resized = if (hscale - vscale).abs() < f64::EPSILON {
-        ops::resize(&image, hscale).context("resize failed")?
-    } else {
-        ops::resize_with_opts(&image, hscale, &ResizeOptions { vscale, ..Default::default() })
-            .context("resize failed")?
-    };
-
-    // For crop mode, extract the centre to the exact requested dimensions.
-    if fit == "crop" {
-        let rw = resized.get_width();
-        let rh = resized.get_height();
-        let tw = params.wid.map(|w| (w as i32).min(rw)).unwrap_or(rw);
-        let th = params.hei.map(|h| (h as i32).min(rh)).unwrap_or(rh);
-        let x = (rw - tw) / 2;
-        let y = (rh - th) / 2;
-        ops::extract_area(&resized, x, y, tw, th).context("centre-crop failed")
-    } else {
-        Ok(resized)
     }
 }
 
@@ -189,8 +217,8 @@ fn apply_flip(image: VipsImage, params: &TransformParams) -> anyhow::Result<Vips
         "h" => ops::flip(&image, ops::Direction::Horizontal).context("flip horizontal failed"),
         "v" => ops::flip(&image, ops::Direction::Vertical).context("flip vertical failed"),
         "hv" | "vh" => {
-            let h = ops::flip(&image, ops::Direction::Horizontal)
-                .context("flip horizontal failed")?;
+            let h =
+                ops::flip(&image, ops::Direction::Horizontal).context("flip horizontal failed")?;
             ops::flip(&h, ops::Direction::Vertical).context("flip vertical failed")
         }
         _ => Ok(image),
@@ -217,14 +245,12 @@ fn encode(
 
     match params.fmt.as_deref().unwrap_or(default_fmt) {
         "webp" => {
-            let bytes = ops::webpsave_buffer_with_opts(
-                &image,
-                &WebpsaveBufferOptions {
-                    q: quality,
-                    ..Default::default()
-                },
-            )
-            .context("webp encode failed")?;
+            if !webp_supported() {
+                return Err(anyhow!(
+                    "webp encoding is not supported by this libvips build"
+                ));
+            }
+            let bytes = webp_save_buffer(&image, quality).context("webp encode failed")?;
             Ok((bytes, "image/webp"))
         }
         "png" => {
@@ -232,6 +258,17 @@ fn encode(
             Ok((bytes, "image/png"))
         }
         "avif" => {
+            // Critical: probe AVIF support BEFORE calling heifsave_buffer.
+            // libvips returns NULL when AVIF support is missing (e.g. no AV1
+            // encoder linked into libheif), and the libvips Rust crate then
+            // constructs a Vec from a null pointer — triggering an
+            // unrecoverable SIGABRT via Rust's UB checks. We must not let
+            // the call happen at all in that case.
+            if !avif_supported() {
+                return Err(anyhow!(
+                    "avif encoding is not supported by this libvips build"
+                ));
+            }
             let bytes = ops::heifsave_buffer_with_opts(
                 &image,
                 &HeifsaveBufferOptions {
@@ -258,11 +295,45 @@ fn encode(
     }
 }
 
+// ---- Private helpers -------------------------------------------------------
+
+/// Encode `image` to a WebP buffer at the given quality.
+///
+/// The high-level [`ops::webpsave_buffer_with_opts`] passes options such as
+/// `smart-deblock` and `passes` that were introduced after libvips 8.15 and
+/// cause the C function to return an error on older installs.  Using
+/// [`VipsImage::image_write_to_buffer`] with an option-encoded suffix avoids
+/// this version skew while still honoring the requested quality.
+fn webp_save_buffer(image: &VipsImage, quality: i32) -> anyhow::Result<Vec<u8>> {
+    let suffix = format!(".webp[Q={}]", quality);
+    image
+        .image_write_to_buffer(&suffix)
+        .map_err(|e| anyhow::anyhow!("webp encode failed: {}", e))
+}
+
+// ---- Test helpers ----------------------------------------------------------
+
+/// Create a small solid-black RGB JPEG in memory.  Only compiled during tests.
+#[cfg(test)]
+pub(crate) fn test_jpeg(w: i32, h: i32) -> Vec<u8> {
+    ensure_vips();
+    let image = ops::black_with_opts(w, h, &BlackOptions { bands: 3 })
+        .expect("failed to create test image");
+    ops::jpegsave_buffer(&image).expect("failed to encode test JPEG")
+}
+
 // ---- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decode `bytes` with libvips and return `(width, height)`.
+    fn image_dims(bytes: &[u8]) -> (i32, i32) {
+        ensure_vips();
+        let img = VipsImage::new_from_buffer(bytes, "").expect("failed to decode output image");
+        (img.get_width(), img.get_height())
+    }
 
     #[test]
     fn default_params_are_all_none() {
@@ -295,45 +366,41 @@ mod tests {
         assert_eq!(p.flip.as_deref(), Some("h"));
     }
 
-    // Helper: create a small 3-band (RGB) JPEG in memory using libvips.
-    fn make_test_jpeg(w: i32, h: i32) -> Vec<u8> {
-        ensure_vips();
-        let image = ops::black_with_opts(w, h, &BlackOptions { bands: 3 })
-            .expect("failed to create test image");
-        ops::jpegsave_buffer(&image).expect("failed to encode test image as JPEG")
-    }
-
-    // The tests below require libvips to be installed on the system.
-    // Run with: cargo test -- --include-ignored
-
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn passthrough_returns_jpeg() {
-        let bytes = make_test_jpeg(64, 64);
+        let bytes = test_jpeg(64, 64);
         let (out, mime) = apply(bytes, TransformParams::default(), "image/jpeg")
             .await
             .unwrap();
         assert_eq!(mime, "image/jpeg");
         assert!(!out.is_empty());
+        // No resize params → source dimensions unchanged.
+        let (w, h) = image_dims(&out);
+        assert_eq!((w, h), (64, 64));
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn resize_width_only() {
-        let bytes = make_test_jpeg(64, 64);
+        // 64×64 source, constrain to wid=32 (no hei) → 32×32 (aspect preserved).
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
             ..Default::default()
         };
         let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 32, "width should be exactly 32");
+        assert_eq!(
+            h, 32,
+            "height should be 32 (aspect ratio preserved for square source)"
+        );
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn resize_to_webp_with_quality() {
-        let bytes = make_test_jpeg(64, 64);
+        // 64×64 source, constrain to 32×32 → exactly 32×32.
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
             hei: Some(32),
@@ -343,13 +410,14 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/webp");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!((w, h), (32, 32));
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn crop_fit_fills_target_box() {
-        let bytes = make_test_jpeg(64, 64);
+        // 64×64 source, fit=crop → output must be exactly the requested dimensions.
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(20),
             hei: Some(40),
@@ -359,13 +427,53 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/png");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 20, "crop fit: width must equal requested wid");
+        assert_eq!(h, 40, "crop fit: height must equal requested hei");
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
+    async fn constrain_fit_preserves_aspect_ratio() {
+        // Non-square source: 64×32.  Constrain to a 32×32 box.
+        // scale = min(32/64, 32/32) = min(0.5, 1.0) = 0.5 → output 32×16.
+        let bytes = test_jpeg(64, 32);
+        let params = TransformParams {
+            wid: Some(32),
+            hei: Some(32),
+            fit: Some("constrain".to_string()),
+            ..Default::default()
+        };
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
+        assert_eq!(mime, "image/jpeg");
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 32, "constrain: width must not exceed requested wid");
+        assert_eq!(
+            h, 16,
+            "constrain: height must preserve aspect ratio (32×16)"
+        );
+    }
+
+    #[tokio::test]
+    async fn stretch_fit_exact_dimensions() {
+        // fit=stretch must produce exactly the requested dimensions regardless of aspect ratio.
+        let bytes = test_jpeg(64, 64);
+        let params = TransformParams {
+            wid: Some(20),
+            hei: Some(40),
+            fit: Some("stretch".to_string()),
+            ..Default::default()
+        };
+        let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
+        assert_eq!(mime, "image/jpeg");
+        let (w, h) = image_dims(&out);
+        assert_eq!(w, 20, "stretch fit: width must equal requested wid");
+        assert_eq!(h, 40, "stretch fit: height must equal requested hei");
+    }
+
+    #[tokio::test]
     async fn pre_crop_and_rotate_90() {
-        let bytes = make_test_jpeg(64, 64);
+        // Pre-crop extracts a 32×32 region; rotating a square by 90° keeps 32×32.
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             crop: Some("0,0,32,32".to_string()),
             rotate: Some(90),
@@ -373,26 +481,35 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!(
+            (w, h),
+            (32, 32),
+            "32×32 cropped region rotated 90° must stay 32×32"
+        );
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn flip_both_axes() {
-        let bytes = make_test_jpeg(64, 64);
+        // Flipping does not change dimensions.
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             flip: Some("hv".to_string()),
             ..Default::default()
         };
         let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/jpeg");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!((w, h), (64, 64), "flip must not change image dimensions");
     }
 
     #[tokio::test]
-    #[ignore = "requires libvips installed"]
     async fn avif_encode() {
-        let bytes = make_test_jpeg(64, 64);
+        if !avif_supported() {
+            eprintln!("skipping avif_encode: libvips on this host has no AVIF saver");
+            return;
+        }
+        let bytes = test_jpeg(64, 64);
         let params = TransformParams {
             wid: Some(32),
             fmt: Some("avif".to_string()),
@@ -401,6 +518,33 @@ mod tests {
         };
         let (out, mime) = apply(bytes, params, "image/jpeg").await.unwrap();
         assert_eq!(mime, "image/avif");
-        assert!(!out.is_empty());
+        let (w, h) = image_dims(&out);
+        assert_eq!(
+            (w, h),
+            (32, 32),
+            "avif output must be constrained to requested width"
+        );
+    }
+
+    #[tokio::test]
+    async fn avif_encode_returns_error_when_unsupported() {
+        // Inverse of avif_encode: when libvips lacks AVIF support, the
+        // encode call must return a typed error rather than letting
+        // libvips's heifsave_buffer return NULL and trigger an unrecoverable
+        // SIGABRT inside the libvips Rust crate's `new_byte_array`.
+        if avif_supported() {
+            eprintln!("skipping unsupported-avif test: libvips on this host has an AVIF saver");
+            return;
+        }
+        let bytes = test_jpeg(32, 32);
+        let params = TransformParams {
+            fmt: Some("avif".to_string()),
+            ..Default::default()
+        };
+        let err = apply(bytes, params, "image/jpeg").await.unwrap_err();
+        assert!(
+            err.to_string().contains("avif encoding is not supported"),
+            "expected avif unsupported error, got: {err}"
+        );
     }
 }

@@ -16,15 +16,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+
+      - name: Install system dependencies (libvips)
+        run: |
+          sudo apt-get update
+          # libvips-dev is required. libheif-dev and libaom-dev are best-effort
+          # extras that may enable AVIF encoding when libvips on this Ubuntu
+          # release was compiled with libheif support. If they are absent or
+          # libvips lacks an AVIF saver, the runtime probe in
+          # `rendition::transform::avif_supported` returns false and AVIF
+          # tests skip cleanly instead of aborting the test process.
+          sudo apt-get install -y --no-install-recommends \
+            libvips-dev \
+            libheif-dev \
+            libaom-dev \
+            pkg-config
 
       - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache Cargo registry & build artefacts
-        uses: actions/cache@v4
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7  # v5.0.4
         with:
           path: |
             ~/.cargo/registry
@@ -44,4 +60,4 @@ jobs:
         run: cargo build --verbose
 
       - name: Test
-        run: cargo test --verbose
+        run: cargo test --verbose -- --test-threads=1
