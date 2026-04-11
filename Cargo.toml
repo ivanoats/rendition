@@ -25,3 +25,4 @@ libvips = "1.7.3"
 axum-test = "14"
 tempfile = "3"
 proptest = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
