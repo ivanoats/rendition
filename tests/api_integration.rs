@@ -22,8 +22,8 @@ fn make_server() -> TestServer {
 
 /// Decode PNG bytes and return `(width, height)`.
 fn png_dims(bytes: &[u8]) -> (u32, u32) {
-    let img = image::load_from_memory(bytes)
-        .unwrap_or_else(|e| panic!("failed to decode image: {e}"));
+    let img =
+        image::load_from_memory(bytes).unwrap_or_else(|e| panic!("failed to decode image: {e}"));
     (img.width(), img.height())
 }
 
@@ -98,7 +98,10 @@ async fn cdn_resize_width_returns_correct_dimensions() {
         .await;
     resp.assert_status_ok();
     let (out_w, _out_h) = png_dims(resp.as_bytes());
-    assert_eq!(out_w, target_w, "output width should equal the requested width");
+    assert_eq!(
+        out_w, target_w,
+        "output width should equal the requested width"
+    );
 }
 
 #[tokio::test]
