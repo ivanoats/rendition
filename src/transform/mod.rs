@@ -50,7 +50,7 @@ impl TransformParams {
     ///
     /// Uses JSON encoding for human-debuggability; the exact wire format is
     /// an implementation detail — callers must treat the bytes as opaque.
-    pub fn canonical_bytes(&self) -> Vec<u8> {
+    pub fn canonical_bytes(&self) -> Option<Vec<u8>> {
         /// Private struct with fields declared in alphabetical order.
         /// `serde_json` serialises struct fields in declaration order, so
         /// this guarantees a stable JSON key sequence regardless of how the
@@ -77,7 +77,7 @@ impl TransformParams {
             rotate: self.rotate,
             wid: self.wid,
         })
-        .expect("CanonicalParams serialization is infallible")
+        .ok()
     }
 }
 

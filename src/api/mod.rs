@@ -84,16 +84,18 @@ where
     // ── Step 1: cache lookup ────────────────────────────────────────────────
     let cache_key = cache::compute_cache_key(&asset_path, &params);
 
-    if let Some(cached) = state.cache.get(&cache_key) {
-        state.metrics.record_cache_hit();
-        return (
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(cached.content_type),
-            )],
-            cached.data,
-        )
-            .into_response();
+    if let Some(key) = &cache_key {
+        if let Some(cached) = state.cache.get(key) {
+            state.metrics.record_cache_hit();
+            return (
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(cached.content_type),
+                )],
+                cached.data,
+            )
+                .into_response();
+        }
     }
     state.metrics.record_cache_miss();
 
@@ -118,21 +120,22 @@ where
     // ── Step 3: transform ───────────────────────────────────────────────────
     match transform::apply(asset.data, params, &asset.content_type).await {
         Ok((bytes, content_type)) => {
-            // Store the successful response in the cache.
-            state.cache.put(
-                cache_key,
-                &asset_path,
-                CachedResponse {
-                    data: bytes.clone(),
-                    content_type,
-                },
-            );
+            // Wrap in Bytes for zero-copy cloning into cache + response.
+            let data = bytes::Bytes::from(bytes);
+            // Store the successful response in the cache if we have a key.
+            if let Some(key) = cache_key {
+                state.cache.put(
+                    key,
+                    &asset_path,
+                    CachedResponse {
+                        data: data.clone(),
+                        content_type,
+                    },
+                );
+            }
             (
-                [(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static(content_type),
-                )],
-                bytes,
+                [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+                data,
             )
                 .into_response()
         }
@@ -412,14 +415,26 @@ mod tests {
         // First request → cache miss → libvips transform → cache store.
         let resp1 = server.get("/cdn/photo.jpg").await;
         assert_eq!(resp1.status_code(), StatusCode::OK);
-        assert_eq!(metrics.cache_misses_total(), 1, "first request should be a miss");
+        assert_eq!(
+            metrics.cache_misses_total(),
+            1,
+            "first request should be a miss"
+        );
         assert_eq!(metrics.cache_hits_total(), 0, "no hits yet");
 
         // Second identical request → cache hit → no libvips invocation.
         let resp2 = server.get("/cdn/photo.jpg").await;
         assert_eq!(resp2.status_code(), StatusCode::OK);
-        assert_eq!(metrics.cache_hits_total(), 1, "second request should be a cache hit");
-        assert_eq!(metrics.cache_misses_total(), 1, "miss count must not increase");
+        assert_eq!(
+            metrics.cache_hits_total(),
+            1,
+            "second request should be a cache hit"
+        );
+        assert_eq!(
+            metrics.cache_misses_total(),
+            1,
+            "miss count must not increase"
+        );
 
         // Both responses must carry the same bytes.
         assert_eq!(
@@ -502,7 +517,15 @@ mod tests {
         server.get("/cdn/ghost.jpg").await; // 404
         server.get("/cdn/ghost.jpg").await; // should also be a miss, not a hit
 
-        assert_eq!(metrics.cache_hits_total(), 0, "404 responses must not be cached");
-        assert_eq!(metrics.cache_misses_total(), 2, "each 404 request should be a miss");
+        assert_eq!(
+            metrics.cache_hits_total(),
+            0,
+            "404 responses must not be cached"
+        );
+        assert_eq!(
+            metrics.cache_misses_total(),
+            2,
+            "each 404 request should be a miss"
+        );
     }
 }
