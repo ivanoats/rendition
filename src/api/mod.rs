@@ -17,6 +17,15 @@
 //! | `fmt`     | Output format: `webp` · `avif` · `jpeg` · `png`          | original    |
 //! | `qlt`     | Quality 1–100 (lossy formats)                             | `85`        |
 //! | `crop`    | Pre-resize crop region `x,y,w,h`                          | none        |
+//!
+//! ## Caching
+//!
+//! `serve_asset` performs a cache lookup **before** hitting storage.  On a
+//! hit the response is returned directly from [`AppState::cache`] without
+//! fetching the asset or running the libvips pipeline.  On a miss the result
+//! is stored in the cache after a successful transform.
+//!
+//! Cache hits and misses are tracked via [`AppState::metrics`].
 
 use axum::{
     extract::{Path, Query, State},
@@ -28,6 +37,8 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
+    cache::{self, CachedResponse, TransformCache},
+    metrics::Metrics,
     storage::{StorageBackend, StorageError},
     transform::{self, TransformParams},
 };
@@ -36,6 +47,10 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState<S> {
     pub storage: Arc<S>,
+    /// In-process transform cache — keyed on SHA-256 of (path, params).
+    pub cache: Arc<dyn TransformCache>,
+    /// Operational counters (cache hits/misses, etc.).
+    pub metrics: Arc<Metrics>,
 }
 
 /// Returns the sub-router for all `/cdn/…` transform endpoints.
@@ -50,10 +65,14 @@ where
 
 /// Serve and optionally transform a media asset.
 ///
-/// 1. Parses transform parameters from the query string (→ 400 on bad input).
-/// 2. Fetches raw bytes from the storage backend (→ 404 if missing).
-/// 3. Runs the transform pipeline (→ 500 on failure).
-/// 4. Streams the result with the correct `Content-Type`.
+/// Pipeline (per component design C-07):
+/// 1. Compute cache key from `(path, params)`.
+/// 2. **Cache hit** → return cached bytes + record hit metric.
+/// 3. **Cache miss** → record miss metric, continue.
+/// 4. Fetch raw bytes from storage backend (→ 404 if missing).
+/// 5. Run the transform pipeline (→ 500 on failure).
+/// 6. Store the result in the cache.
+/// 7. Stream the result with the correct `Content-Type`.
 async fn serve_asset<S>(
     State(state): State<AppState<S>>,
     Path(asset_path): Path<String>,
@@ -62,6 +81,25 @@ async fn serve_asset<S>(
 where
     S: StorageBackend,
 {
+    // ── Step 1: cache lookup ────────────────────────────────────────────────
+    let cache_key = cache::compute_cache_key(&asset_path, &params);
+
+    if let Some(key) = &cache_key {
+        if let Some(cached) = state.cache.get(key) {
+            state.metrics.record_cache_hit();
+            return (
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(cached.content_type),
+                )],
+                cached.data,
+            )
+                .into_response();
+        }
+    }
+    state.metrics.record_cache_miss();
+
+    // ── Step 2: storage fetch ───────────────────────────────────────────────
     match state.storage.exists(&asset_path).await {
         Ok(true) => {}
         Ok(false) => {
@@ -79,12 +117,28 @@ where
         Err(err) => return storage_error_response(&asset_path, err),
     };
 
+    // ── Step 3: transform ───────────────────────────────────────────────────
     match transform::apply(asset.data, params, &asset.content_type).await {
-        Ok((bytes, content_type)) => (
-            [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
-            bytes,
-        )
-            .into_response(),
+        Ok((bytes, content_type)) => {
+            // Wrap in Bytes for zero-copy cloning into cache + response.
+            let data = bytes::Bytes::from(bytes);
+            // Store the successful response in the cache if we have a key.
+            if let Some(key) = cache_key {
+                state.cache.put(
+                    key,
+                    &asset_path,
+                    CachedResponse {
+                        data: data.clone(),
+                        content_type,
+                    },
+                );
+            }
+            (
+                [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+                data,
+            )
+                .into_response()
+        }
         Err(err) => {
             tracing::error!("transform error for {asset_path}: {err:#}");
             // Map "format unsupported by this libvips build" errors to 415,
@@ -142,7 +196,9 @@ mod tests {
     use axum_test::TestServer;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use crate::cache::MokaTransformCache;
     use crate::storage::{Asset, StorageBackend, StorageError};
 
     // -- MockStorage ---------------------------------------------------------
@@ -179,14 +235,21 @@ mod tests {
         }
     }
 
-    fn make_server(storage: MockStorage) -> TestServer {
-        let state = AppState {
+    // -- Test helpers --------------------------------------------------------
+
+    fn make_state(storage: MockStorage) -> AppState<MockStorage> {
+        AppState {
             storage: Arc::new(storage),
-        };
-        TestServer::new(router(state)).expect("failed to build test server")
+            cache: Arc::new(MokaTransformCache::new(100, Duration::from_secs(3600))),
+            metrics: Arc::new(Metrics::new()),
+        }
     }
 
-    // -- Tests ---------------------------------------------------------------
+    fn make_server(storage: MockStorage) -> TestServer {
+        TestServer::new(router(make_state(storage))).expect("failed to build test server")
+    }
+
+    // -- Existing behaviour (regression) ------------------------------------
 
     #[tokio::test]
     async fn missing_asset_returns_404() {
@@ -279,9 +342,6 @@ mod tests {
 
     #[tokio::test]
     async fn fmt_avif_returns_avif_content_type() {
-        // libvips on some hosts (notably default Ubuntu builds) lacks an AV1
-        // encoder linked into libheif. We probe at runtime and skip the
-        // assertion path that would otherwise return 415.
         if !crate::transform::avif_supported() {
             eprintln!("skipping fmt_avif test: libvips on this host has no AVIF saver");
             return;
@@ -305,9 +365,6 @@ mod tests {
 
     #[tokio::test]
     async fn fmt_avif_unsupported_returns_415() {
-        // The complement of the test above: when libvips lacks AVIF support,
-        // a request for fmt=avif must return 415 Unsupported Media Type
-        // rather than 500 or (worse) aborting the process.
         if crate::transform::avif_supported() {
             eprintln!("skipping unsupported-avif test: libvips on this host has an AVIF saver");
             return;
@@ -338,6 +395,137 @@ mod tests {
                 .get("content-type")
                 .and_then(|v| v.to_str().ok()),
             Some("image/png")
+        );
+    }
+
+    // -- Cache behaviour (Unit 3 acceptance criteria) -----------------------
+
+    /// FR-03: A second identical request must be served from cache.
+    ///
+    /// We verify this by asserting that after the second request the cache-hit
+    /// counter is exactly 1 (and the miss counter is exactly 1, proving only
+    /// the first request hit storage).
+    #[tokio::test]
+    async fn second_request_hits_cache() {
+        let jpeg = crate::transform::test_jpeg(32, 32);
+        let state = make_state(MockStorage::empty().with_file("photo.jpg", jpeg));
+        let metrics = Arc::clone(&state.metrics);
+        let server = TestServer::new(router(state)).expect("failed to build test server");
+
+        // First request → cache miss → libvips transform → cache store.
+        let resp1 = server.get("/cdn/photo.jpg").await;
+        assert_eq!(resp1.status_code(), StatusCode::OK);
+        assert_eq!(
+            metrics.cache_misses_total(),
+            1,
+            "first request should be a miss"
+        );
+        assert_eq!(metrics.cache_hits_total(), 0, "no hits yet");
+
+        // Second identical request → cache hit → no libvips invocation.
+        let resp2 = server.get("/cdn/photo.jpg").await;
+        assert_eq!(resp2.status_code(), StatusCode::OK);
+        assert_eq!(
+            metrics.cache_hits_total(),
+            1,
+            "second request should be a cache hit"
+        );
+        assert_eq!(
+            metrics.cache_misses_total(),
+            1,
+            "miss count must not increase"
+        );
+
+        // Both responses must carry the same bytes.
+        assert_eq!(
+            resp1.as_bytes(),
+            resp2.as_bytes(),
+            "cached response must be byte-for-byte identical to the original"
+        );
+    }
+
+    /// FR-03: `rendition_cache_hits_total` increments on a cache hit.
+    #[tokio::test]
+    async fn cache_hit_increments_metric() {
+        let jpeg = crate::transform::test_jpeg(32, 32);
+        let state = make_state(MockStorage::empty().with_file("photo.jpg", jpeg));
+        let metrics = Arc::clone(&state.metrics);
+        let server = TestServer::new(router(state)).expect("failed to build test server");
+
+        server.get("/cdn/photo.jpg").await; // prime the cache
+        server.get("/cdn/photo.jpg").await; // cache hit
+        server.get("/cdn/photo.jpg").await; // cache hit
+
+        assert_eq!(metrics.cache_hits_total(), 2);
+    }
+
+    /// FR-03: `rendition_cache_misses_total` increments on a cache miss.
+    #[tokio::test]
+    async fn cache_miss_increments_metric() {
+        let jpeg = crate::transform::test_jpeg(32, 32);
+        let state = make_state(MockStorage::empty().with_file("photo.jpg", jpeg));
+        let metrics = Arc::clone(&state.metrics);
+        let server = TestServer::new(router(state)).expect("failed to build test server");
+
+        server.get("/cdn/photo.jpg").await; // miss (first request)
+
+        assert_eq!(metrics.cache_misses_total(), 1);
+        assert_eq!(metrics.cache_hits_total(), 0);
+    }
+
+    /// FR-03: Different transform params produce separate cache entries.
+    #[tokio::test]
+    async fn different_params_are_cached_separately() {
+        let jpeg = crate::transform::test_jpeg(64, 64);
+        let state = make_state(MockStorage::empty().with_file("photo.jpg", jpeg));
+        let metrics = Arc::clone(&state.metrics);
+        let server = TestServer::new(router(state)).expect("failed to build test server");
+
+        server
+            .get("/cdn/photo.jpg")
+            .add_query_param("wid", "32")
+            .await;
+        server
+            .get("/cdn/photo.jpg")
+            .add_query_param("wid", "16")
+            .await;
+
+        // Both are distinct cache keys → two misses, zero hits.
+        assert_eq!(metrics.cache_misses_total(), 2);
+        assert_eq!(metrics.cache_hits_total(), 0);
+
+        // Now repeat each → two hits.
+        server
+            .get("/cdn/photo.jpg")
+            .add_query_param("wid", "32")
+            .await;
+        server
+            .get("/cdn/photo.jpg")
+            .add_query_param("wid", "16")
+            .await;
+
+        assert_eq!(metrics.cache_hits_total(), 2);
+    }
+
+    /// FR-03: A 404 response must NOT be cached.
+    #[tokio::test]
+    async fn missing_asset_not_cached() {
+        let state = make_state(MockStorage::empty());
+        let metrics = Arc::clone(&state.metrics);
+        let server = TestServer::new(router(state)).expect("failed to build test server");
+
+        server.get("/cdn/ghost.jpg").await; // 404
+        server.get("/cdn/ghost.jpg").await; // should also be a miss, not a hit
+
+        assert_eq!(
+            metrics.cache_hits_total(),
+            0,
+            "404 responses must not be cached"
+        );
+        assert_eq!(
+            metrics.cache_misses_total(),
+            2,
+            "each 404 request should be a miss"
         );
     }
 }
